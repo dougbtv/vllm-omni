@@ -128,19 +128,29 @@ def create_app(model: str) -> FastAPI:
                 f"cfg: {request.true_cfg_scale}, seed: {request.seed}"
             )
 
+            # Build generation parameters, filtering out None values
+            # (vllm-omni's validation doesn't handle None comparisons well)
+            gen_params = {
+                "prompt": request.prompt,
+                "height": height,
+                "width": width,
+                "num_images_per_prompt": request.n,
+                "num_outputs_per_prompt": request.n,
+                "num_inference_steps": request.num_inference_steps,
+            }
+
+            # Add optional parameters only if not None
+            if request.negative_prompt is not None:
+                gen_params["negative_prompt"] = request.negative_prompt
+            if request.true_cfg_scale is not None:
+                gen_params["true_cfg_scale"] = request.true_cfg_scale
+            if request.guidance_scale is not None:
+                gen_params["guidance_scale"] = request.guidance_scale
+            if generator is not None:
+                gen_params["generator"] = generator
+
             # Generate images using the diffusion engine
-            images = omni_instance.generate(
-                prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                height=height,
-                width=width,
-                num_images_per_prompt=request.n,
-                num_outputs_per_prompt=request.n,
-                num_inference_steps=request.num_inference_steps,
-                true_cfg_scale=request.true_cfg_scale,
-                guidance_scale=request.guidance_scale,
-                generator=generator,
-            )
+            images = omni_instance.generate(**gen_params)
 
             logger.info(f"Successfully generated {len(images)} image(s)")
 

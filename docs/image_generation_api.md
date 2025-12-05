@@ -1,0 +1,404 @@
+# Image Generation API
+
+vLLM-Omni provides an OpenAI DALL-E compatible API for text-to-image generation using diffusion models.
+
+## Quick Start
+
+### 1. Start the Server
+
+```bash
+python -m vllm_omni.entrypoints.openai.serving_image \
+  --model Qwen/Qwen-Image \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+The server will:
+- Load the Qwen-Image diffusion model
+- Start listening on `http://0.0.0.0:8000`
+- Expose the `/v1/images/generations` endpoint
+
+### 2. Generate Images
+
+Using the example client:
+
+```bash
+python examples/online_serving/image_generation/client.py \
+  --prompt "a cat on a laptop" \
+  --output cat.png
+```
+
+Using curl:
+
+```bash
+curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a beautiful sunset over mountains",
+    "size": "1024x1024",
+    "n": 1,
+    "seed": 42
+  }' | jq -r '.data[0].b64_json' | base64 -d > sunset.png
+```
+
+## API Reference
+
+### Endpoint
+
+```
+POST /v1/images/generations
+```
+
+### Request Format
+
+```json
+{
+  "prompt": "text description",
+  "model": "Qwen/Qwen-Image",
+  "n": 1,
+  "size": "1024x1024",
+  "response_format": "b64_json",
+  "negative_prompt": "text to avoid",
+  "num_inference_steps": 50,
+  "true_cfg_scale": 4.0,
+  "seed": 42
+}
+```
+
+### Request Parameters
+
+#### OpenAI Standard Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `prompt` | string | **required** | Text description of the desired image |
+| `model` | string | `"Qwen/Qwen-Image"` | Model to use (fixed at server startup) |
+| `n` | integer | `1` | Number of images to generate (1-10) |
+| `size` | string | `"1024x1024"` | Image dimensions (WxH format) |
+| `response_format` | string | `"b64_json"` | Response format (`b64_json` only) |
+| `user` | string | `null` | User identifier for tracking |
+
+#### vllm-omni Extension Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `negative_prompt` | string | `null` | Text describing what to avoid |
+| `num_inference_steps` | integer | `50` | Number of diffusion steps (1-200) |
+| `guidance_scale` | float | `null` | Classifier-free guidance scale (0.0-20.0) |
+| `true_cfg_scale` | float | `4.0` | True CFG scale for Qwen-Image (0.0-20.0) |
+| `seed` | integer | `null` | Random seed for reproducibility |
+
+### Response Format
+
+```json
+{
+  "created": 1701234567,
+  "data": [
+    {
+      "b64_json": "<base64-encoded PNG>",
+      "url": null,
+      "revised_prompt": null
+    }
+  ]
+}
+```
+
+### Supported Image Sizes
+
+- `256x256`
+- `512x512`
+- `1024x1024`
+- `1792x1024`
+- `1024x1792`
+
+Custom sizes are also supported (use WxH format like `800x600`).
+
+## Error Responses
+
+### 400 Bad Request
+
+Invalid parameters or unsupported format:
+
+```json
+{
+  "detail": "Invalid size format: 'invalid'. Expected format: 'WIDTHxHEIGHT'"
+}
+```
+
+### 422 Unprocessable Entity
+
+Validation errors (Pydantic):
+
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "prompt"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
+
+### 500 Internal Server Error
+
+Generation failures:
+
+```json
+{
+  "detail": "Image generation failed: CUDA out of memory"
+}
+```
+
+### 503 Service Unavailable
+
+Model not loaded:
+
+```json
+{
+  "detail": "Model not loaded. Server may still be initializing."
+}
+```
+
+## Examples
+
+### Python Client
+
+```python
+import requests
+import base64
+from PIL import Image
+import io
+
+# Generate image
+response = requests.post(
+    "http://localhost:8000/v1/images/generations",
+    json={
+        "prompt": "a dragon flying over mountains",
+        "size": "1024x1024",
+        "num_inference_steps": 50,
+        "seed": 42,
+    }
+)
+
+# Decode and save
+img_data = response.json()["data"][0]["b64_json"]
+img_bytes = base64.b64decode(img_data)
+img = Image.open(io.BytesIO(img_bytes))
+img.save("dragon.png")
+```
+
+### Using OpenAI SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-needed",  # No auth required for PoC
+)
+
+response = client.images.generate(
+    model="Qwen/Qwen-Image",
+    prompt="a white siamese cat",
+    n=1,
+    size="1024x1024",
+    response_format="b64_json"
+)
+
+# Note: Extension parameters (seed, steps) require direct HTTP requests
+```
+
+### Multiple Images
+
+```bash
+python examples/online_serving/image_generation/client.py \
+  --prompt "a futuristic city" \
+  --output city.png \
+  --n 4 \
+  --seed 123
+```
+
+This will generate 4 images saved as:
+- `city_0.png`
+- `city_1.png`
+- `city_2.png`
+- `city_3.png`
+
+### With Negative Prompt
+
+```bash
+python examples/online_serving/image_generation/client.py \
+  --prompt "a beautiful landscape" \
+  --negative-prompt "blurry, low quality, distorted, ugly" \
+  --output landscape.png \
+  --steps 100
+```
+
+## Server Configuration
+
+### Command Line Options
+
+```bash
+python -m vllm_omni.entrypoints.openai.serving_image --help
+```
+
+Options:
+- `--model`: Model name or path (default: `Qwen/Qwen-Image`)
+- `--host`: Host address (default: `0.0.0.0`)
+- `--port`: Port number (default: `8000`)
+- `--log-level`: Logging level (default: `info`)
+- `--reload`: Enable auto-reload for development
+
+### Development Mode
+
+```bash
+python -m vllm_omni.entrypoints.openai.serving_image \
+  --reload \
+  --log-level debug
+```
+
+## Performance Tips
+
+### Memory Optimization
+
+The server automatically enables:
+- VAE slicing: Reduces memory usage for large images
+- VAE tiling: Enables processing of very large images
+
+### Reducing Generation Time
+
+- Use fewer steps: `--steps 25` (lower quality but faster)
+- Generate smaller images: `--size 512x512`
+
+### CUDA Out of Memory
+
+If you encounter OOM errors:
+1. Reduce image size: `512x512` instead of `1024x1024`
+2. Reduce number of steps: `25` instead of `50`
+3. Generate one image at a time: `n=1`
+
+## Monitoring
+
+### Health Check
+
+```bash
+curl http://localhost:8000/health
+```
+
+Response:
+```json
+{
+  "status": "ok",
+  "model": "Qwen/Qwen-Image",
+  "ready": true
+}
+```
+
+### Logs
+
+The server logs:
+- Request parameters (prompt, size, steps)
+- Generation time
+- Errors with stack traces
+
+Example log:
+```
+INFO: Generating 1 image(s) - prompt: 'a cat on a laptop...' size: 1024x1024, steps: 50, cfg: 4.0, seed: 42
+INFO: Successfully generated 1 image(s)
+```
+
+## Troubleshooting
+
+### Server Won't Start
+
+**Error**: `Failed to load model`
+
+Check:
+- Model name is correct: `Qwen/Qwen-Image`
+- HuggingFace cache is accessible
+- Sufficient disk space for model download
+
+### Connection Refused
+
+**Error**: `Connection refused`
+
+Check:
+- Server is running: `curl http://localhost:8000/health`
+- Correct host/port: default is `0.0.0.0:8000`
+- Firewall settings
+
+### Invalid Size
+
+**Error**: `Invalid size format`
+
+Use correct format: `WIDTHxHEIGHT`
+- Valid: `1024x1024`, `512x768`
+- Invalid: `1024`, `1024x`
+
+### URL Response Format Not Supported
+
+**Error**: `'url' response format is not supported`
+
+Currently only `b64_json` is supported. Images are returned as base64-encoded PNG data.
+
+## Integration with ComfyUI
+
+The ComfyUI custom node (separate project) integrates with this API:
+
+1. Start this server on a known URL
+2. Install ComfyUI custom node
+3. Configure node to point to server URL
+4. Use in ComfyUI workflows
+
+See the ComfyUI integration documentation for details.
+
+## Limitations (PoC)
+
+This is a proof-of-concept implementation with some limitations:
+
+1. **Synchronous only**: Requests block during generation
+2. **Single model**: Cannot switch models without restart
+3. **Base64 only**: URL response format not implemented
+4. **No batching**: Processes one request at a time
+5. **No authentication**: Open access
+
+## Future Enhancements
+
+Planned improvements:
+- Async request handling for concurrency
+- Multiple model support
+- URL response format with image hosting
+- Request queuing and load balancing
+- Integration with main `vllm serve` command
+- Authentication and rate limiting
+- Prometheus metrics endpoint
+
+## Testing
+
+### Run Tests
+
+```bash
+# Unit tests (no GPU required)
+pytest tests/entrypoints/openai/test_image_server.py -v
+
+# Specific test
+pytest tests/entrypoints/openai/test_image_server.py::test_parse_size_valid -v
+```
+
+### Manual Testing
+
+```bash
+# Start server
+python -m vllm_omni.entrypoints.openai.serving_image
+
+# Test health
+curl http://localhost:8000/health
+
+# Test generation
+curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "test", "size": "512x512"}' \
+  | jq
+```

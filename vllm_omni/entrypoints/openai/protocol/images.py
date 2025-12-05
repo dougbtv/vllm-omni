@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+OpenAI-compatible protocol definitions for image generation.
+
+This module provides Pydantic models that follow the OpenAI DALL-E API specification
+for text-to-image generation, with vllm-omni specific extensions.
+"""
+
+from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class ImageSize(str, Enum):
+    """Supported image sizes (WxH format)"""
+
+    SIZE_256 = "256x256"
+    SIZE_512 = "512x512"
+    SIZE_1024 = "1024x1024"
+    SIZE_1792_1024 = "1792x1024"
+    SIZE_1024_1792 = "1024x1792"
+
+
+class ResponseFormat(str, Enum):
+    """Image response format"""
+
+    B64_JSON = "b64_json"
+    URL = "url"  # Not implemented in PoC
+
+
+class ImageGenerationRequest(BaseModel):
+    """
+    OpenAI DALL-E compatible image generation request.
+
+    Follows the OpenAI Images API specification with vllm-omni extensions
+    for advanced diffusion parameters.
+    """
+
+    # Required fields
+    prompt: str = Field(..., description="Text description of the desired image(s)")
+
+    # OpenAI standard fields
+    model: Optional[str] = Field(
+        default="Qwen/Qwen-Image", description="Model to use for image generation"
+    )
+    n: Optional[int] = Field(default=1, ge=1, le=10, description="Number of images to generate")
+    size: Optional[ImageSize] = Field(default=ImageSize.SIZE_1024, description="Image dimensions")
+    response_format: Optional[ResponseFormat] = Field(
+        default=ResponseFormat.B64_JSON, description="Format of the returned image"
+    )
+    user: Optional[str] = Field(default=None, description="User identifier for tracking")
+
+    # vllm-omni extensions for diffusion control
+    negative_prompt: Optional[str] = Field(
+        default=None, description="Text describing what to avoid in the image"
+    )
+    num_inference_steps: Optional[int] = Field(
+        default=50, ge=1, le=200, description="Number of diffusion sampling steps"
+    )
+    guidance_scale: Optional[float] = Field(
+        default=None, ge=0.0, le=20.0, description="Classifier-free guidance scale"
+    )
+    true_cfg_scale: Optional[float] = Field(
+        default=4.0, ge=0.0, le=20.0, description="True CFG scale (Qwen-Image specific)"
+    )
+    seed: Optional[int] = Field(default=None, description="Random seed for reproducibility")
+
+    # VAE memory optimizations (set at model init, included for completeness)
+    vae_use_slicing: Optional[bool] = Field(default=False, description="Enable VAE slicing")
+    vae_use_tiling: Optional[bool] = Field(default=False, description="Enable VAE tiling")
+
+
+class ImageData(BaseModel):
+    """Single generated image data"""
+
+    b64_json: Optional[str] = Field(default=None, description="Base64-encoded PNG image")
+    url: Optional[str] = Field(default=None, description="Image URL (not implemented)")
+    revised_prompt: Optional[str] = Field(
+        default=None, description="Revised prompt (OpenAI compatibility, always null)"
+    )
+
+
+class ImageGenerationResponse(BaseModel):
+    """
+    OpenAI DALL-E compatible image generation response.
+
+    Returns generated images with metadata.
+    """
+
+    created: int = Field(..., description="Unix timestamp of when the generation completed")
+    data: list[ImageData] = Field(..., description="Array of generated images")

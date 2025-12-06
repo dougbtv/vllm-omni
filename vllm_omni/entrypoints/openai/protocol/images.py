@@ -43,7 +43,8 @@ class ImageGenerationRequest(BaseModel):
 
     # OpenAI standard fields
     model: Optional[str] = Field(
-        default="Qwen/Qwen-Image", description="Model to use for image generation"
+        default=None,
+        description="Model to use (optional, uses server's configured model if omitted)",
     )
     n: Optional[int] = Field(default=1, ge=1, le=10, description="Number of images to generate")
     size: Optional[ImageSize] = Field(default=ImageSize.SIZE_1024, description="Image dimensions")
@@ -57,13 +58,19 @@ class ImageGenerationRequest(BaseModel):
         default=None, description="Text describing what to avoid in the image"
     )
     num_inference_steps: Optional[int] = Field(
-        default=50, ge=1, le=200, description="Number of diffusion sampling steps"
+        default=None,
+        ge=1,
+        le=200,
+        description="Number of diffusion sampling steps (model-specific defaults apply)",
     )
     guidance_scale: Optional[float] = Field(
         default=None, ge=0.0, le=20.0, description="Classifier-free guidance scale"
     )
     true_cfg_scale: Optional[float] = Field(
-        default=4.0, ge=0.0, le=20.0, description="True CFG scale (Qwen-Image specific)"
+        default=None,
+        ge=0.0,
+        le=20.0,
+        description="True CFG scale (Qwen-Image specific, ignored by other models)",
     )
     seed: Optional[int] = Field(default=None, description="Random seed for reproducibility")
 

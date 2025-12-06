@@ -312,12 +312,13 @@ def test_parameter_validation():
     """Test Pydantic model validation"""
     from vllm_omni.entrypoints.openai.protocol.images import ImageGenerationRequest
 
-    # Valid request
+    # Valid request - defaults are now None (model-agnostic)
     req = ImageGenerationRequest(prompt="test")
     assert req.prompt == "test"
     assert req.n == 1
-    assert req.num_inference_steps == 50
-    assert req.true_cfg_scale == 4.0
+    assert req.model is None  # No hardcoded default
+    assert req.num_inference_steps is None  # Profile default applies
+    assert req.true_cfg_scale is None  # Profile default applies
 
     # Invalid num_inference_steps (out of range)
     with pytest.raises(ValueError):
@@ -332,3 +333,185 @@ def test_parameter_validation():
 
     with pytest.raises(ValueError):
         ImageGenerationRequest(prompt="test", guidance_scale=21.0)
+
+
+# Multi-Model Tests
+
+
+@pytest.fixture
+def qwen_client(mock_omni):
+    """Create test client configured for Qwen-Image"""
+    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni):
+        app = create_app(model="Qwen/Qwen-Image")
+
+        import vllm_omni.entrypoints.openai.image_server as server_module
+
+        server_module.omni_instance = mock_omni
+
+        return TestClient(app)
+
+
+@pytest.fixture
+def zimage_client(mock_omni):
+    """Create test client configured for Z-Image Turbo"""
+    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni):
+        app = create_app(model="Tongyi-MAI/Z-Image-Turbo")
+
+        import vllm_omni.entrypoints.openai.image_server as server_module
+
+        server_module.omni_instance = mock_omni
+
+        return TestClient(app)
+
+
+def test_qwen_health_includes_profile(qwen_client):
+    """Test Qwen health endpoint includes profile info"""
+    response = qwen_client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["model"] == "Qwen/Qwen-Image"
+    assert data["profile"] is not None
+    assert data["profile"]["default_steps"] == 50
+    assert data["profile"]["max_steps"] == 200
+
+
+def test_zimage_health_includes_profile(zimage_client):
+    """Test Z-Image health endpoint includes profile info"""
+    response = zimage_client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["model"] == "Tongyi-MAI/Z-Image-Turbo"
+    assert data["profile"] is not None
+    assert data["profile"]["default_steps"] == 9
+    assert data["profile"]["max_steps"] == 16
+
+
+def test_qwen_uses_default_steps(qwen_client, mock_omni):
+    """Test Qwen uses profile default steps when not specified"""
+    response = qwen_client.post(
+        "/v1/images/generations",
+        json={"prompt": "test", "size": "1024x1024"},
+    )
+    assert response.status_code == 200
+
+    # Check that generate was called with Qwen's default 50 steps
+    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    assert call_kwargs.get("num_inference_steps") == 50
+
+
+def test_zimage_uses_default_steps(zimage_client, mock_omni):
+    """Test Z-Image uses profile default steps when not specified"""
+    response = zimage_client.post(
+        "/v1/images/generations",
+        json={"prompt": "test", "size": "1024x1024"},
+    )
+    assert response.status_code == 200
+
+    # Check that generate was called with Z-Image's default 9 steps
+    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    assert call_kwargs.get("num_inference_steps") == 9
+
+
+def test_zimage_forces_guidance_scale_zero(zimage_client, mock_omni):
+    """Test Z-Image forces guidance_scale to 0.0 regardless of user input"""
+    response = zimage_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            "guidance_scale": 5.0,  # User requests 5.0
+        },
+    )
+    assert response.status_code == 200
+
+    # Z-Image should force guidance_scale to 0.0
+    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    assert call_kwargs.get("guidance_scale") == 0.0
+
+
+def test_zimage_ignores_true_cfg_scale(zimage_client, mock_omni):
+    """Test Z-Image ignores true_cfg_scale (Qwen-specific parameter)"""
+    response = zimage_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            "true_cfg_scale": 4.0,  # User provides Qwen parameter
+        },
+    )
+    assert response.status_code == 200
+
+    # Z-Image should not pass true_cfg_scale to generate()
+    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    assert "true_cfg_scale" not in call_kwargs
+
+
+def test_qwen_uses_true_cfg_scale(qwen_client, mock_omni):
+    """Test Qwen uses true_cfg_scale parameter"""
+    response = qwen_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            "true_cfg_scale": 5.0,
+        },
+    )
+    assert response.status_code == 200
+
+    # Qwen should pass true_cfg_scale to generate()
+    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    assert call_kwargs.get("true_cfg_scale") == 5.0
+
+
+def test_zimage_rejects_excessive_steps(zimage_client):
+    """Test Z-Image rejects num_inference_steps > max (16)"""
+    response = zimage_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            "num_inference_steps": 100,  # Exceeds Z-Image max of 16
+        },
+    )
+    assert response.status_code == 400
+    assert "exceeds maximum" in response.json()["detail"]
+
+
+def test_qwen_accepts_high_steps(qwen_client):
+    """Test Qwen accepts high num_inference_steps (up to 200)"""
+    response = qwen_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            "num_inference_steps": 100,
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_model_field_validation(qwen_client):
+    """Test that request model field must match server model"""
+    # Request with mismatched model should fail
+    response = qwen_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "model": "Tongyi-MAI/Z-Image-Turbo",  # Server is Qwen
+        },
+    )
+    assert response.status_code == 400
+    assert "Model mismatch" in response.json()["detail"]
+
+
+def test_model_field_omitted_works(qwen_client):
+    """Test that omitting model field uses server's model"""
+    response = qwen_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "test",
+            "size": "1024x1024",
+            # model field omitted
+        },
+    )
+    assert response.status_code == 200

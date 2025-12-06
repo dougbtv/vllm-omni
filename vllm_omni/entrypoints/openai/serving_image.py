@@ -14,10 +14,15 @@ Usage:
 """
 
 import argparse
+import sys
 
 import uvicorn
 
 from vllm.logger import init_logger
+from vllm_omni.entrypoints.openai.image_model_profiles import (
+    get_model_profile,
+    list_supported_models,
+)
 from vllm_omni.entrypoints.openai.image_server import create_app
 
 logger = init_logger(__name__)
@@ -49,7 +54,7 @@ Examples:
         "--model",
         type=str,
         default="Qwen/Qwen-Image",
-        help="Diffusion model name or local path (default: Qwen/Qwen-Image)",
+        help="Diffusion model name (e.g., 'Qwen/Qwen-Image', 'Tongyi-MAI/Z-Image-Turbo')",
     )
     parser.add_argument(
         "--host",
@@ -83,10 +88,22 @@ def main():
     """Main entry point for the image generation server."""
     args = parse_args()
 
+    # Validate model early before starting the server
+    try:
+        profile = get_model_profile(args.model)
+    except ValueError as e:
+        logger.error(f"Error: {e}")
+        logger.error(f"Supported models: {', '.join(list_supported_models())}")
+        sys.exit(1)
+
     logger.info("=" * 70)
     logger.info("vLLM-Omni Image Generation Server")
     logger.info("=" * 70)
     logger.info(f"Model: {args.model}")
+    logger.info(
+        f"Inference Steps: {profile.default_num_inference_steps} "
+        f"(max {profile.max_num_inference_steps})"
+    )
     logger.info(f"Server URL: http://{args.host}:{args.port}")
     logger.info(f"API Endpoint: http://{args.host}:{args.port}/v1/images/generations")
     logger.info(f"Health Check: http://{args.host}:{args.port}/health")

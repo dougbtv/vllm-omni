@@ -19,6 +19,10 @@ from fastapi.responses import JSONResponse
 
 from vllm.logger import init_logger
 from vllm_omni.entrypoints.omni import Omni
+from vllm_omni.entrypoints.openai.image_model_profiles import (
+    DiffusionModelProfile,
+    get_model_profile,
+)
 from vllm_omni.entrypoints.openai.protocol.images import (
     ImageData,
     ImageGenerationRequest,
@@ -31,6 +35,116 @@ logger = init_logger(__name__)
 # Global state for model instance (managed via lifespan)
 omni_instance: Optional[Omni] = None
 model_name: str = None
+model_profile: Optional[DiffusionModelProfile] = None
+
+
+def validate_request_model(request_model: Optional[str], server_model: str) -> None:
+    """
+    Validate that request model matches server model.
+
+    Args:
+        request_model: Model name from request (may be None)
+        server_model: Model name configured for this server instance
+
+    Raises:
+        HTTPException: If request_model is specified but doesn't match server_model
+    """
+    if request_model is not None and request_model != server_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Model mismatch: request specifies '{request_model}' but "
+                f"server is running '{server_model}'. Either omit the 'model' "
+                f"field or use '{server_model}'."
+            ),
+        )
+
+
+def build_generation_params(
+    request: ImageGenerationRequest,
+    profile: DiffusionModelProfile,
+    width: int,
+    height: int,
+    generator: Optional[torch.Generator],
+) -> dict:
+    """
+    Build generation kwargs for Omni.generate() using model profile.
+
+    This function translates the API request parameters into model-specific
+    generation kwargs, applying defaults, constraints, and forced values from
+    the model profile.
+
+    Args:
+        request: Image generation request
+        profile: Model profile with defaults and constraints
+        width: Image width in pixels
+        height: Image height in pixels
+        generator: Optional random generator for reproducibility
+
+    Returns:
+        Dictionary of kwargs to pass to omni_instance.generate()
+
+    Raises:
+        ValueError: If parameters violate model constraints (e.g., steps exceed max)
+    """
+    gen_params = {
+        "prompt": request.prompt,
+        "height": height,
+        "width": width,
+        "num_images_per_prompt": request.n,
+        "num_outputs_per_prompt": request.n,
+    }
+
+    # Apply model defaults and limits for num_inference_steps
+    num_steps = request.num_inference_steps or profile.default_num_inference_steps
+    if num_steps > profile.max_num_inference_steps:
+        raise ValueError(
+            f"num_inference_steps={num_steps} exceeds maximum for "
+            f"{profile.model_name} (max={profile.max_num_inference_steps})"
+        )
+    gen_params["num_inference_steps"] = num_steps
+
+    # Add negative_prompt if supported
+    if request.negative_prompt and profile.supports_negative_prompt:
+        gen_params["negative_prompt"] = request.negative_prompt
+
+    # Handle guidance_scale with forced override support
+    if profile.supports_guidance_scale:
+        if profile.force_guidance_scale is not None:
+            # Model requires specific guidance_scale value (e.g., Z-Image Turbo requires 0.0)
+            gen_params["guidance_scale"] = profile.force_guidance_scale
+            if (
+                request.guidance_scale is not None
+                and request.guidance_scale != profile.force_guidance_scale
+            ):
+                logger.warning(
+                    f"Ignoring guidance_scale={request.guidance_scale}, "
+                    f"{profile.model_name} requires guidance_scale={profile.force_guidance_scale}"
+                )
+        elif request.guidance_scale is not None:
+            # Use user-provided value
+            gen_params["guidance_scale"] = request.guidance_scale
+        elif profile.default_guidance_scale is not None:
+            # Use profile default
+            gen_params["guidance_scale"] = profile.default_guidance_scale
+
+    # Handle true_cfg_scale (Qwen-specific)
+    if profile.supports_true_cfg_scale:
+        cfg = request.true_cfg_scale or profile.default_true_cfg_scale
+        if cfg is not None:
+            gen_params["true_cfg_scale"] = cfg
+    elif request.true_cfg_scale is not None:
+        # Warn if user provides true_cfg_scale for non-Qwen model
+        logger.warning(
+            f"Ignoring true_cfg_scale={request.true_cfg_scale}, "
+            f"{profile.model_name} doesn't support this parameter"
+        )
+
+    # Add generator for reproducibility
+    if generator:
+        gen_params["generator"] = generator
+
+    return gen_params
 
 
 @asynccontextmanager
@@ -40,23 +154,35 @@ async def lifespan(app: FastAPI):
 
     Loads the diffusion model on startup and cleans up on shutdown.
     """
-    global omni_instance, model_name
+    global omni_instance, model_name, model_profile
 
     logger.info(f"Loading diffusion model: {model_name}")
     try:
-        omni_instance = Omni(
-            model=model_name,
-            vae_use_slicing=True,  # Memory optimization for large images
-            vae_use_tiling=True,  # Memory optimization for large images
+        # Load model profile
+        model_profile = get_model_profile(model_name)
+        logger.info(
+            f"Model profile loaded - "
+            f"steps: {model_profile.default_num_inference_steps} "
+            f"(max {model_profile.max_num_inference_steps})"
         )
+
+        # Create Omni instance with profile-specific kwargs
+        omni_kwargs = {"model": model_name, **model_profile.omni_kwargs}
+        omni_instance = Omni(**omni_kwargs)
+
         logger.info("Model loaded successfully")
         yield
+    except ValueError as e:
+        # Model not supported (raised by get_model_profile)
+        logger.error(f"Unsupported model: {e}")
+        raise
     except Exception as e:
         logger.error(f"Failed to load model: {e}", exc_info=True)
         raise
     finally:
         logger.info("Shutting down image server")
         omni_instance = None
+        model_profile = None
 
 
 def create_app(model: str) -> FastAPI:
@@ -81,8 +207,20 @@ def create_app(model: str) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        """Health check endpoint"""
-        return {"status": "ok", "model": model_name, "ready": omni_instance is not None}
+        """Health check endpoint with model profile information"""
+        return {
+            "status": "ok",
+            "model": model_name,
+            "ready": omni_instance is not None,
+            "profile": (
+                {
+                    "default_steps": model_profile.default_num_inference_steps,
+                    "max_steps": model_profile.max_num_inference_steps,
+                }
+                if model_profile
+                else None
+            ),
+        }
 
     @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
     async def create_image(request: ImageGenerationRequest) -> ImageGenerationResponse:
@@ -101,7 +239,7 @@ def create_app(model: str) -> FastAPI:
         Raises:
             HTTPException: On validation errors (400), server errors (500), or service unavailable (503)
         """
-        global omni_instance
+        global omni_instance, model_name, model_profile
 
         if omni_instance is None:
             raise HTTPException(
@@ -110,6 +248,9 @@ def create_app(model: str) -> FastAPI:
             )
 
         try:
+            # Validate request model matches server model
+            validate_request_model(request.model, model_name)
+
             # Parse size parameter (e.g., "1024x1024" → (1024, 1024))
             width, height = parse_size(request.size)
 
@@ -121,33 +262,17 @@ def create_app(model: str) -> FastAPI:
                 device = detect_device_type()
                 generator = torch.Generator(device=device).manual_seed(request.seed)
 
-            # Log generation request
-            logger.info(
-                f"Generating {request.n} image(s) - prompt: '{request.prompt[:50]}...' "
-                f"size: {width}x{height}, steps: {request.num_inference_steps}, "
-                f"cfg: {request.true_cfg_scale}, seed: {request.seed}"
+            # Build generation parameters using model profile
+            gen_params = build_generation_params(
+                request, model_profile, width, height, generator
             )
 
-            # Build generation parameters, filtering out None values
-            # (vllm-omni's validation doesn't handle None comparisons well)
-            gen_params = {
-                "prompt": request.prompt,
-                "height": height,
-                "width": width,
-                "num_images_per_prompt": request.n,
-                "num_outputs_per_prompt": request.n,
-                "num_inference_steps": request.num_inference_steps,
-            }
-
-            # Add optional parameters only if not None
-            if request.negative_prompt is not None:
-                gen_params["negative_prompt"] = request.negative_prompt
-            if request.true_cfg_scale is not None:
-                gen_params["true_cfg_scale"] = request.true_cfg_scale
-            if request.guidance_scale is not None:
-                gen_params["guidance_scale"] = request.guidance_scale
-            if generator is not None:
-                gen_params["generator"] = generator
+            # Log generation request
+            logger.info(
+                f"[{model_name}] Generating {request.n} image(s) - "
+                f"prompt: '{request.prompt[:50]}...', size: {width}x{height}, "
+                f"steps: {gen_params['num_inference_steps']}, seed: {request.seed}"
+            )
 
             # Generate images using the diffusion engine
             images = omni_instance.generate(**gen_params)

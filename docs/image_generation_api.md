@@ -2,10 +2,20 @@
 
 vLLM-Omni provides an OpenAI DALL-E compatible API for text-to-image generation using diffusion models.
 
+## Supported Models
+
+The image generation API supports multiple diffusion models:
+
+- **Qwen/Qwen-Image**: Alibaba's Qwen-Image model with true CFG support
+- **Tongyi-MAI/Z-Image-Turbo**: Fast Z-Image Turbo model optimized for ~9 inference steps
+
+Each server instance runs a single model (specified at startup via `--model`).
+
 ## Quick Start
 
 ### 1. Start the Server
 
+**With Qwen-Image:**
 ```bash
 python -m vllm_omni.entrypoints.openai.serving_image \
   --model Qwen/Qwen-Image \
@@ -13,8 +23,16 @@ python -m vllm_omni.entrypoints.openai.serving_image \
   --port 8000
 ```
 
+**With Z-Image Turbo:**
+```bash
+python -m vllm_omni.entrypoints.openai.serving_image \
+  --model Tongyi-MAI/Z-Image-Turbo \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
 The server will:
-- Load the Qwen-Image diffusion model
+- Load the specified diffusion model
 - Start listening on `http://0.0.0.0:8000`
 - Expose the `/v1/images/generations` endpoint
 
@@ -72,7 +90,7 @@ POST /v1/images/generations
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | **required** | Text description of the desired image |
-| `model` | string | `"Qwen/Qwen-Image"` | Model to use (fixed at server startup) |
+| `model` | string | `null` (uses server's model) | Model to use (optional, must match server if specified) |
 | `n` | integer | `1` | Number of images to generate (1-10) |
 | `size` | string | `"1024x1024"` | Image dimensions (WxH format) |
 | `response_format` | string | `"b64_json"` | Response format (`b64_json` only) |
@@ -83,10 +101,26 @@ POST /v1/images/generations
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `negative_prompt` | string | `null` | Text describing what to avoid |
-| `num_inference_steps` | integer | `50` | Number of diffusion steps (1-200) |
-| `guidance_scale` | float | `null` | Classifier-free guidance scale (0.0-20.0) |
-| `true_cfg_scale` | float | `4.0` | True CFG scale for Qwen-Image (0.0-20.0) |
+| `num_inference_steps` | integer | model-dependent | Number of diffusion steps (1-200, see table below) |
+| `guidance_scale` | float | model-dependent | Classifier-free guidance scale (0.0-20.0) |
+| `true_cfg_scale` | float | model-dependent | True CFG scale for Qwen-Image (0.0-20.0, ignored by Z-Image) |
 | `seed` | integer | `null` | Random seed for reproducibility |
+
+#### Parameter Support by Model
+
+Different models have different defaults and constraints:
+
+| Parameter | Qwen/Qwen-Image | Tongyi-MAI/Z-Image-Turbo |
+|-----------|-----------------|---------------------------|
+| `num_inference_steps` | Default: 50, Max: 200 | Default: 9, Max: 16 |
+| `guidance_scale` | Default: 1.0 (user configurable) | **Forced to 0.0** (user input ignored) |
+| `true_cfg_scale` | Default: 4.0 (used by model) | **Ignored** (Qwen-specific parameter) |
+| `negative_prompt` | ✅ Supported | ✅ Supported |
+
+**Important notes:**
+- Z-Image Turbo is distilled for `guidance_scale=0.0` and will **always** use this value regardless of user input
+- Z-Image Turbo will **ignore** `true_cfg_scale` (Qwen-specific parameter)
+- If `num_inference_steps` exceeds the model's max, the request will be rejected with a 400 error
 
 ### Response Format
 
@@ -209,6 +243,33 @@ response = client.images.generate(
 
 # Note: Extension parameters (seed, steps) require direct HTTP requests
 ```
+
+### Z-Image Turbo Example
+
+Z-Image Turbo is optimized for fast generation with ~9 inference steps:
+
+```bash
+# Start Z-Image server
+python -m vllm_omni.entrypoints.openai.serving_image \
+  --model Tongyi-MAI/Z-Image-Turbo \
+  --port 8000
+
+# Generate image (in another terminal)
+curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a beautiful mountain landscape at sunset",
+    "size": "1024x1024",
+    "num_inference_steps": 9,
+    "seed": 42
+  }' | jq -r '.data[0].b64_json' | base64 -d > landscape.png
+```
+
+**Z-Image Turbo notes:**
+- Default steps: 9 (recommended for best quality/speed trade-off)
+- Maximum steps: 16 (requests with more steps will be rejected)
+- `guidance_scale` is always forced to 0.0 (Turbo is distilled for CFG=0)
+- `true_cfg_scale` is ignored (Qwen-specific parameter)
 
 ### Multiple Images
 

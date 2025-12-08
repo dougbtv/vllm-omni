@@ -6,8 +6,12 @@ vLLM-Omni provides an OpenAI DALL-E compatible API for text-to-image generation 
 
 The image generation API supports multiple diffusion models:
 
+**Image Generation:**
 - **Qwen/Qwen-Image**: Alibaba's Qwen-Image model with true CFG support
 - **Tongyi-MAI/Z-Image-Turbo**: Fast Z-Image Turbo model optimized for ~9 inference steps
+
+**Image Editing:**
+- **Qwen/Qwen-Image-Edit**: Full-image editing based on text prompts
 
 Each server instance runs a single model (specified at startup via `--model`).
 
@@ -58,6 +62,115 @@ curl -X POST http://localhost:8000/v1/images/generations \
     "seed": 42
   }' | jq -r '.data[0].b64_json' | base64 -d > sunset.png
 ```
+
+## Image Editing API
+
+vLLM-Omni supports image editing via the `/v1/images/edits` endpoint, compatible with OpenAI's DALL-E image editing API.
+
+### Endpoint
+
+```
+POST /v1/images/edits
+Content-Type: multipart/form-data
+```
+
+### Quick Start
+
+**Start edit server:**
+```bash
+python -m vllm_omni.entrypoints.openai.serving_image \
+  --model Qwen/Qwen-Image-Edit \
+  --port 8000
+```
+
+**Edit image:**
+```bash
+curl -X POST http://localhost:8000/v1/images/edits \
+  -F "image=@input.png" \
+  -F "prompt=make the sky blue and add clouds" \
+  -F "n=1" \
+  -F "seed=42" \
+  | jq -r '.data[0].b64_json' | base64 -d > edited.png
+```
+
+### Request Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `image` | file | **Yes** | Image to edit (PNG, JPEG, WebP, max 4MB) |
+| `prompt` | string | **Yes** | Text instruction for how to edit the image |
+| `model` | string | No | Model name (must match server if specified) |
+| `mask` | file | No | **Not currently supported** - ignored with warning |
+| `n` | integer | No | Number of edited images (1-10, default: 1) |
+| `size` | string | No | Output size (WxH). Auto-calculated if omitted |
+| `response_format` | string | No | `b64_json` only (default) |
+| `negative_prompt` | string | No | What to avoid in edited image |
+| `num_inference_steps` | integer | No | Steps (default: 50, max: 200) |
+| `guidance_scale` | float | No | CFG scale (default: 1.0) |
+| `true_cfg_scale` | float | No | True CFG scale (default: 4.0) |
+| `seed` | integer | No | Random seed for reproducibility |
+
+### Automatic Size Calculation
+
+If `size` is omitted, output dimensions are calculated from the input image's aspect ratio while maintaining ~1,024,024 pixels:
+
+- Input: 800x600 (4:3) → Output: ~1152x864
+- Input: 1920x1080 (16:9) → Output: ~1344x768
+- Input: 1080x1920 (9:16) → Output: ~768x1344
+
+**Note:** Dimensions are always multiples of 32 (VAE constraint).
+
+### Examples
+
+#### Python Client
+
+```python
+import requests
+import base64
+from PIL import Image
+import io
+
+with open("input.png", "rb") as f:
+    response = requests.post(
+        "http://localhost:8000/v1/images/edits",
+        files={"image": f},
+        data={
+            "prompt": "add a sunset in the background",
+            "num_inference_steps": 50,
+            "seed": 42,
+        }
+    )
+
+img_data = response.json()["data"][0]["b64_json"]
+img_bytes = base64.b64decode(img_data)
+img = Image.open(io.BytesIO(img_bytes))
+img.save("edited.png")
+```
+
+#### Multiple Variations
+
+```bash
+curl -X POST http://localhost:8000/v1/images/edits \
+  -F "image=@landscape.jpg" \
+  -F "prompt=change season to winter with snow" \
+  -F "n=4" \
+  -F "seed=123"
+```
+
+#### With Explicit Size
+
+```bash
+curl -X POST http://localhost:8000/v1/images/edits \
+  -F "image=@portrait.png" \
+  -F "prompt=professional headshot style" \
+  -F "size=1024x1024"
+```
+
+### Current Limitations
+
+- **No masking/inpainting**: The `mask` parameter is accepted but ignored
+- **One model per server**: Specify edit model at startup
+- **Base64 only**: URL response format not supported
 
 ## API Reference
 

@@ -94,6 +94,23 @@ MODEL_PROFILES: dict[str, DiffusionModelProfile] = {
         supports_negative_prompt=True,
         omni_kwargs={},  # No special VAE settings needed for Z-Image
     ),
+    "Qwen/Qwen-Image-Edit": DiffusionModelProfile(
+        model_name="Qwen/Qwen-Image-Edit",
+        default_num_inference_steps=50,
+        max_num_inference_steps=200,
+        default_height=1024,  # Reference only - actual size calculated at runtime from input image
+        default_width=1024,
+        supports_guidance_scale=True,
+        default_guidance_scale=1.0,
+        force_guidance_scale=None,
+        supports_true_cfg_scale=True,
+        default_true_cfg_scale=4.0,  # Matches pipeline default
+        supports_negative_prompt=True,
+        omni_kwargs={
+            "vae_use_slicing": True,  # Memory optimization for large images
+            "vae_use_tiling": True,  # Memory optimization for large images
+        },
+    ),
 }
 
 

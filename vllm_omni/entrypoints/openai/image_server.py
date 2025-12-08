@@ -273,7 +273,7 @@ def build_edit_params(
 
     gen_params = {
         "prompt": prompt,
-        "image": image,  # Pass PIL Image directly
+        "pil_image": image,  # Pass PIL Image directly
         "height": height,
         "width": width,
         "num_images_per_prompt": n,

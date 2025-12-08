@@ -574,7 +574,7 @@ def test_edit_single_image(edit_client, mock_omni_edit):
 
     # Verify generate called with image
     call_kwargs = mock_omni_edit.generate.call_args[1]
-    assert "image" in call_kwargs
+    assert "pil_image" in call_kwargs
     assert call_kwargs["prompt"] == "make the sky blue"
 
 

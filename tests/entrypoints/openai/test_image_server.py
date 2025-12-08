@@ -515,3 +515,172 @@ def test_model_field_omitted_works(qwen_client):
         },
     )
     assert response.status_code == 200
+
+
+# Image Editing Tests
+
+
+def create_test_image(size=(512, 512), color="red", format="PNG"):
+    """Create test image file for upload."""
+    img = Image.new("RGB", size, color=color)
+    buf = io.BytesIO()
+    img.save(buf, format=format)
+    buf.seek(0)
+    return buf
+
+
+@pytest.fixture
+def mock_omni_edit():
+    """Mock Omni for editing operations."""
+    mock = Mock()
+
+    def generate(**kwargs):
+        n = kwargs.get("num_images_per_prompt", 1)
+        width = kwargs.get("width", 512)
+        height = kwargs.get("height", 512)
+        return [Image.new("RGB", (width, height), color="blue") for _ in range(n)]
+
+    mock.generate = generate
+    return mock
+
+
+@pytest.fixture
+def edit_client(mock_omni_edit):
+    """Test client for Qwen-Image-Edit."""
+    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni_edit):
+        app = create_app(model="Qwen/Qwen-Image-Edit")
+
+        import vllm_omni.entrypoints.openai.image_server as server_module
+
+        server_module.omni_instance = mock_omni_edit
+
+        return TestClient(app)
+
+
+def test_edit_single_image(edit_client, mock_omni_edit):
+    """Test basic image editing."""
+    image_file = create_test_image()
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "make the sky blue"},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["data"]) == 1
+    assert "b64_json" in data["data"][0]
+
+    # Verify generate called with image
+    call_kwargs = mock_omni_edit.generate.call_args[1]
+    assert "image" in call_kwargs
+    assert call_kwargs["prompt"] == "make the sky blue"
+
+
+def test_edit_auto_size_calculation(edit_client, mock_omni_edit):
+    """Test auto size calculation from input."""
+    image_file = create_test_image(size=(800, 600))
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "enhance"},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 200
+
+    # Check auto-calculated dimensions
+    call_kwargs = mock_omni_edit.generate.call_args[1]
+    width = call_kwargs["width"]
+    height = call_kwargs["height"]
+
+    assert width % 32 == 0
+    assert height % 32 == 0
+    assert abs((width / height) - (800 / 600)) < 0.1  # Aspect ratio preserved
+
+
+def test_edit_with_mask_warning(edit_client, mock_omni_edit):
+    """Test mask parameter is accepted but logged as ignored."""
+    image_file = create_test_image()
+    mask_file = create_test_image(color="white")
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test"},
+        files={
+            "image": ("test.png", image_file, "image/png"),
+            "mask": ("mask.png", mask_file, "image/png"),
+        },
+    )
+
+    assert response.status_code == 200
+    # Mask should be ignored (no error)
+
+
+def test_edit_missing_image(edit_client):
+    """Test error when image is missing."""
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test"},
+    )
+
+    assert response.status_code == 422  # FastAPI validation error
+
+
+def test_edit_invalid_image_format(edit_client):
+    """Test error on invalid image format."""
+    text_file = io.BytesIO(b"not an image")
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test"},
+        files={"image": ("test.txt", text_file, "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid" in response.json()["detail"]
+
+
+def test_edit_multiple_images(edit_client):
+    """Test generating multiple edits."""
+    image_file = create_test_image()
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test", "n": 3},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 3
+
+
+def test_edit_with_seed(edit_client):
+    """Test seed parameter for reproducibility."""
+    image_file = create_test_image()
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test", "seed": 42},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 200
+
+
+def test_edit_explicit_size(edit_client, mock_omni_edit):
+    """Test explicit size parameter."""
+    image_file = create_test_image()
+
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "test", "size": "1024x768"},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 200
+
+    call_kwargs = mock_omni_edit.generate.call_args[1]
+    assert call_kwargs["width"] == 1024
+    assert call_kwargs["height"] == 768

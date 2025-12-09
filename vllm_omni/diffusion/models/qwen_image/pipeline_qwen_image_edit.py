@@ -84,13 +84,13 @@ def get_qwen_image_edit_pre_process_func(
                 isinstance(image, torch.Tensor) and len(image.shape) > 1 and image.shape[1] == latent_channels
             ):
                 image = image_processor.resize(image, height, width)
-                prompt_image = image
+                encoder_image = image  # Resized image for text encoder conditioning
                 image = image_processor.preprocess(image, height, width)
                 image = image.unsqueeze(2)
 
-                # Store preprocessed image and prompt image in request
+                # Store preprocessed image (VAE tensor) and encoder image (PIL for text encoder)
                 req.preprocessed_image = image
-                req.prompt_image = prompt_image
+                req.encoder_image = encoder_image
 
         return requests
 
@@ -306,55 +306,20 @@ class QwenImageEditPipeline(
     def _get_qwen_prompt_embeds(
         self,
         prompt: Union[str, list[str]] = None,
-        image: Optional[torch.Tensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        dtype = dtype or self.text_encoder.dtype
-
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-
-        template = self.prompt_template_encode
-        drop_idx = self.prompt_template_encode_start_idx
-        txt = [template.format(e) for e in prompt]
-
-        model_inputs = self.processor(
-            text=txt,
-            images=image,
-            padding=True,
-            return_tensors="pt",
-        ).to(self.device)
-
-        outputs = self.text_encoder(
-            input_ids=model_inputs.input_ids,
-            attention_mask=model_inputs.attention_mask,
-            pixel_values=model_inputs.pixel_values,
-            image_grid_thw=model_inputs.image_grid_thw,
-            output_hidden_states=True,
-        )
-
-        hidden_states = outputs.hidden_states[-1]
-        split_hidden_states = self._extract_masked_hidden(hidden_states, model_inputs.attention_mask)
-        split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
-        max_seq_len = max([e.size(0) for e in split_hidden_states])
-        prompt_embeds = torch.stack(
-            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
-        )
-        encoder_attention_mask = torch.stack(
-            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
-        )
-
-        prompt_embeds = prompt_embeds.to(dtype=dtype, device=self.device)
-
-        return prompt_embeds, encoder_attention_mask
-
-    def _get_qwen_prompt_embeds(
-        self,
-        prompt: Union[str, list[str]] = None,
         image: Optional[Union[PIL.Image.Image, torch.Tensor]] = None,
         dtype: Optional[torch.dtype] = None,
     ):
-        """Get prompt embeddings with image support for editing."""
+        """
+        Get prompt embeddings with image support for editing.
+
+        Args:
+            prompt: Text prompt(s) for image generation/editing
+            image: Optional input image (PIL Image or tensor) for conditioning
+            dtype: Target dtype for embeddings
+
+        Returns:
+            Tuple of (prompt_embeds, encoder_attention_mask)
+        """
         dtype = dtype or self.text_encoder.dtype
 
         prompt = [prompt] if isinstance(prompt, str) else prompt
@@ -391,7 +356,8 @@ class QwenImageEditPipeline(
             [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
         )
 
-        prompt_embeds = prompt_embeds.to(dtype=dtype)
+        # Ensure embeddings are on correct device and dtype
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=self.device)
 
         return prompt_embeds, encoder_attention_mask
 
@@ -665,8 +631,8 @@ class QwenImageEditPipeline(
 
         # Get preprocessed image from request (pre-processing is done in DiffusionEngine)
         if hasattr(req, "preprocessed_image"):
-            prompt_image = req.prompt_image
-            image = req.preprocessed_image
+            encoder_image = req.encoder_image  # Resized PIL image for text encoder
+            image = req.preprocessed_image  # VAE-preprocessed tensor
             calculated_height = req.calculated_height
             calculated_width = req.calculated_width
             height = req.height
@@ -674,7 +640,8 @@ class QwenImageEditPipeline(
         else:
             # fallback to run pre-processing in pipeline (debug only)
             image_size = image[0].size if isinstance(image, list) else image.size
-            calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
+            # calculate_dimensions returns (width, height) tuple
+            calculated_width, calculated_height = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
             height = height or calculated_height
             width = width or calculated_width
 
@@ -684,7 +651,7 @@ class QwenImageEditPipeline(
 
             if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
                 image = self.image_processor.resize(image, calculated_height, calculated_width)
-                prompt_image = image
+                encoder_image = image  # Resized image for text encoder conditioning
                 image = self.image_processor.preprocess(image, calculated_height, calculated_width)
                 image = image.unsqueeze(2)
 
@@ -734,7 +701,7 @@ class QwenImageEditPipeline(
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt=prompt,
-            image=prompt_image,  # Use resized image for prompt encoding
+            image=encoder_image,  # Use resized image for text encoder conditioning
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
             num_images_per_prompt=num_images_per_prompt,
@@ -744,7 +711,7 @@ class QwenImageEditPipeline(
         if do_true_cfg:
             negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
                 prompt=negative_prompt,
-                image=prompt_image,  # Use same resized image for negative prompt encoding
+                image=encoder_image,  # Use same resized image for negative prompt encoding
                 prompt_embeds=negative_prompt_embeds,
                 prompt_embeds_mask=negative_prompt_embeds_mask,
                 num_images_per_prompt=num_images_per_prompt,

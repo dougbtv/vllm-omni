@@ -62,6 +62,24 @@ def test_parse_size_negative():
         parse_size("-1024x1024")
 
 
+def test_parse_size_edge_cases():
+    """Test size parsing with edge cases like empty strings and non-integers"""
+    # Empty string
+    with pytest.raises(ValueError, match="non-empty string"):
+        parse_size("")
+
+    # Non-integer dimensions
+    with pytest.raises(ValueError, match="must be integers"):
+        parse_size("abc x def")
+
+    with pytest.raises(ValueError, match="must be integers"):
+        parse_size("1024.5x768.5")
+
+    # Missing separator (user might forget 'x')
+    with pytest.raises(ValueError, match="separator"):
+        parse_size("1024 1024")
+
+
 def test_encode_image_base64():
     """Test image encoding to base64"""
     # Create a simple test image
@@ -684,3 +702,28 @@ def test_edit_explicit_size(edit_client, mock_omni_edit):
     call_kwargs = mock_omni_edit.generate.call_args[1]
     assert call_kwargs["width"] == 1024
     assert call_kwargs["height"] == 768
+
+
+def test_edit_empty_prompt(edit_client):
+    """Test error on empty prompt."""
+    image_file = create_test_image()
+
+    # Empty string prompt
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": ""},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"].lower()
+
+    # Whitespace-only prompt
+    response = edit_client.post(
+        "/v1/images/edits",
+        data={"prompt": "   "},
+        files={"image": ("test.png", image_file, "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"].lower()

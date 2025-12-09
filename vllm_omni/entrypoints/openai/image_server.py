@@ -546,6 +546,10 @@ def create_app(model: str) -> FastAPI:
             )
 
         try:
+            # Validate prompt is not empty
+            if not prompt or not prompt.strip():
+                raise ValueError("Prompt cannot be empty. Please provide a text instruction for editing the image.")
+
             # Validate request model matches server model
             validate_request_model(model, model_name)
 
@@ -562,7 +566,10 @@ def create_app(model: str) -> FastAPI:
 
             # Validate n parameter
             if n is not None and (n < 1 or n > 10):
-                raise ValueError("n must be between 1 and 10")
+                raise ValueError(
+                    f"Parameter 'n' must be between 1 and 10 (inclusive), got: {n}. "
+                    f"This limits the number of images generated per request."
+                )
 
             # Validate response_format
             if response_format and response_format != "b64_json":
@@ -648,23 +655,34 @@ def parse_size(size_str: str) -> tuple[int, int]:
     Raises:
         ValueError: If size format is invalid
     """
-    try:
-        parts = size_str.split("x")
-        if len(parts) != 2:
-            raise ValueError(
-                f"Invalid size format: '{size_str}'. Expected format: 'WIDTHxHEIGHT' (e.g., '1024x1024')"
-            )
+    if not size_str or not isinstance(size_str, str):
+        raise ValueError(
+            f"Size must be a non-empty string in format 'WIDTHxHEIGHT' (e.g., '1024x1024'), got: {size_str}"
+        )
 
+    parts = size_str.split("x")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid size format: '{size_str}'. Expected format: 'WIDTHxHEIGHT' (e.g., '1024x1024'). "
+            f"Did you mean to use 'x' as separator?"
+        )
+
+    try:
         width = int(parts[0])
         height = int(parts[1])
-
-        if width <= 0 or height <= 0:
-            raise ValueError(f"Width and height must be positive integers, got: {width}x{height}")
-
-        return width, height
     except ValueError as e:
-        # Re-raise ValueError with clear message
-        raise ValueError(f"Failed to parse size '{size_str}': {e}")
+        raise ValueError(
+            f"Invalid size format: '{size_str}'. Width and height must be integers. "
+            f"Got: width='{parts[0]}', height='{parts[1]}'"
+        ) from e
+
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            f"Width and height must be positive integers, got: {width}x{height}. "
+            f"Both dimensions must be greater than 0."
+        )
+
+    return width, height
 
 
 def encode_image_base64(image) -> str:

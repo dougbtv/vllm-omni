@@ -10,7 +10,7 @@ for text-to-image generation, with vllm-omni specific extensions.
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ImageSize(str, Enum):
@@ -47,25 +47,41 @@ class ImageGenerationRequest(BaseModel):
         description="Model to use (optional, uses server's configured model if omitted)",
     )
     n: Optional[int] = Field(default=1, ge=1, le=10, description="Number of images to generate")
-    size: Optional[ImageSize] = Field(default=ImageSize.SIZE_1024, description="Image dimensions")
+    size: Optional[str] = Field(
+        default="1024x1024", description="Image dimensions in WIDTHxHEIGHT format (e.g., '1024x1024')"
+    )
     response_format: Optional[ResponseFormat] = Field(
         default=ResponseFormat.B64_JSON, description="Format of the returned image"
     )
     user: Optional[str] = Field(default=None, description="User identifier for tracking")
 
+    @field_validator("size")
+    @classmethod
+    def validate_size(cls, v):
+        """Validate and normalize size parameter.
+
+        Accepts either ImageSize enum or string format.
+        Always returns string format for consistent handling.
+        """
+        if v is None:
+            return None
+        # Accept ImageSize enum and extract value
+        if isinstance(v, ImageSize):
+            return v.value
+        # Validate string format
+        if not isinstance(v, str) or "x" not in v:
+            raise ValueError("size must be in format 'WIDTHxHEIGHT' (e.g., '1024x1024')")
+        return v
+
     # vllm-omni extensions for diffusion control
-    negative_prompt: Optional[str] = Field(
-        default=None, description="Text describing what to avoid in the image"
-    )
+    negative_prompt: Optional[str] = Field(default=None, description="Text describing what to avoid in the image")
     num_inference_steps: Optional[int] = Field(
         default=None,
         ge=1,
         le=200,
         description="Number of diffusion sampling steps (model-specific defaults apply)",
     )
-    guidance_scale: Optional[float] = Field(
-        default=None, ge=0.0, le=20.0, description="Classifier-free guidance scale"
-    )
+    guidance_scale: Optional[float] = Field(default=None, ge=0.0, le=20.0, description="Classifier-free guidance scale")
     true_cfg_scale: Optional[float] = Field(
         default=None,
         ge=0.0,

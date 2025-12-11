@@ -21,16 +21,14 @@ Each server instance runs a single model (specified at startup via `--model`).
 
 **With Qwen-Image:**
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --model Qwen/Qwen-Image \
+vllm serve Qwen/Qwen-Image --omni \
   --host 0.0.0.0 \
   --port 8000
 ```
 
 **With Z-Image Turbo:**
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --model Tongyi-MAI/Z-Image-Turbo \
+vllm serve Tongyi-MAI/Z-Image-Turbo --omni \
   --host 0.0.0.0 \
   --port 8000
 ```
@@ -38,7 +36,8 @@ python -m vllm_omni.entrypoints.openai.serving_image \
 The server will:
 - Load the specified diffusion model
 - Start listening on `http://0.0.0.0:8000`
-- Expose the `/v1/images/generations` endpoint
+- Expose the `/v1/images/generations` and `/v1/images/edits` endpoints
+- Also expose `/v1/chat/completions` for chat-based image generation
 
 ### 2. Generate Images
 
@@ -78,8 +77,7 @@ Content-Type: multipart/form-data
 
 **Start edit server:**
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --model Qwen/Qwen-Image-Edit \
+vllm serve Qwen/Qwen-Image-Edit --omni \
   --port 8000
 ```
 
@@ -363,8 +361,7 @@ Z-Image Turbo is optimized for fast generation with ~9 inference steps:
 
 ```bash
 # Start Z-Image server
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --model Tongyi-MAI/Z-Image-Turbo \
+vllm serve Tongyi-MAI/Z-Image-Turbo --omni \
   --port 8000
 
 # Generate image (in another terminal)
@@ -415,22 +412,20 @@ python examples/online_serving/image_generation/client.py \
 ### Command Line Options
 
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image --help
+vllm serve --help
 ```
 
-Options:
-- `--model`: Model name or path (default: `Qwen/Qwen-Image`)
+Key options for diffusion models:
+- `--omni`: Enable omni mode for diffusion models (required)
 - `--host`: Host address (default: `0.0.0.0`)
 - `--port`: Port number (default: `8000`)
-- `--log-level`: Logging level (default: `info`)
-- `--reload`: Enable auto-reload for development
+- `--uvicorn-log-level`: Server logging level (default: `info`)
 
 ### Development Mode
 
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --reload \
-  --log-level debug
+vllm serve <model> --omni \
+  --uvicorn-log-level debug
 ```
 
 ## Performance Tips
@@ -565,10 +560,12 @@ pytest tests/entrypoints/openai/test_image_server.py::test_parse_size_valid -v
 
 ```bash
 # Start server
-python -m vllm_omni.entrypoints.openai.serving_image
+vllm serve Qwen/Qwen-Image --omni --port 8000
 
-# Test health
-curl http://localhost:8000/health
+# Test generation
+curl http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "test image"}'
 
 # Test generation
 curl -X POST http://localhost:8000/v1/images/generations \

@@ -7,8 +7,7 @@ This directory contains example code for using the vLLM-Omni text-to-image gener
 1. Start the image generation server:
 
 ```bash
-python -m vllm_omni.entrypoints.openai.serving_image \
-  --model Qwen/Qwen-Image \
+vllm serve Qwen/Qwen-Image --omni \
   --port 8000
 ```
 
@@ -114,8 +113,10 @@ Error: Failed to connect to API server
 Make sure the server is running at the specified URL:
 
 ```bash
-# Check if server is responding
-curl http://localhost:8000/health
+# Check if server is responding with a test request
+curl http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "test"}'
 ```
 
 ### Out of Memory

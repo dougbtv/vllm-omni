@@ -128,10 +128,7 @@ def get_model_profile(model_name: str) -> DiffusionModelProfile:
     """
     if model_name not in MODEL_PROFILES:
         supported = list_supported_models()
-        raise ValueError(
-            f"Unsupported model: '{model_name}'. "
-            f"Supported models: {', '.join(supported)}"
-        )
+        raise ValueError(f"Unsupported model: '{model_name}'. Supported models: {', '.join(supported)}")
     return MODEL_PROFILES[model_name]
 
 

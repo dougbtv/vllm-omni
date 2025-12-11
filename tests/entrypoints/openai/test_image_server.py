@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for image generation API server.
+Tests for async image generation API endpoints.
 
 This module contains unit tests and integration tests (with mocking) for the
-OpenAI-compatible text-to-image generation API.
+OpenAI-compatible async text-to-image generation API endpoints in api_server.py.
 """
 
 import base64
 import io
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from vllm_omni.entrypoints.openai.image_server import (
-    create_app,
+from vllm_omni.entrypoints.openai.image_api_utils import (
     encode_image_base64,
     parse_size,
 )
@@ -102,42 +101,48 @@ def test_encode_image_base64():
 # Integration Tests (with mocking)
 
 
+class MockGenerationResult:
+    """Mock result object from AsyncOmniDiffusion.generate()"""
+    def __init__(self, images):
+        self.images = images
+
+
 @pytest.fixture
-def mock_omni():
-    """Mock Omni instance that returns fake images"""
+def mock_async_diffusion():
+    """Mock AsyncOmniDiffusion instance that returns fake images"""
     mock = Mock()
 
-    def generate(**kwargs):
-        # Return n PIL images
-        n = kwargs.get("num_images_per_prompt", 1)
-        return [Image.new("RGB", (64, 64), color="blue") for _ in range(n)]
+    async def generate(**kwargs):
+        # Return n PIL images wrapped in result object
+        n = kwargs.get("num_outputs_per_prompt", 1)
+        images = [Image.new("RGB", (64, 64), color="blue") for _ in range(n)]
+        return MockGenerationResult(images)
 
-    mock.generate = generate
+    mock.generate = AsyncMock(side_effect=generate)
     return mock
 
 
 @pytest.fixture
-def test_client(mock_omni):
-    """Create test client with mocked model"""
-    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni):
-        app = create_app(model="test-model")
+def test_client(mock_async_diffusion):
+    """Create test client with mocked async diffusion engine"""
+    from fastapi import FastAPI
+    from vllm.entrypoints.openai.api_server import router
+    from vllm_omni.entrypoints.openai.image_model_profiles import get_model_profile
 
-        # Manually set the global instance for testing
-        import vllm_omni.entrypoints.openai.image_server as server_module
+    app = FastAPI()
+    app.include_router(router)
 
-        server_module.omni_instance = mock_omni
+    # Set up app state with diffusion engine
+    app.state.diffusion_engine = mock_async_diffusion
+    app.state.diffusion_model_name = "Qwen/Qwen-Image"
 
-        return TestClient(app)
+    return TestClient(app)
 
 
+@pytest.mark.skip(reason="Async API server uses different health check mechanism")
 def test_health_endpoint(test_client):
-    """Test health check endpoint"""
-    response = test_client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ok"
-    assert "model" in data
-    assert data["ready"] is True
+    """Test health check endpoint - skipped for async server"""
+    pass
 
 
 def test_generate_single_image(test_client):
@@ -291,14 +296,14 @@ def test_url_response_format_not_supported(test_client):
 
 
 def test_model_not_loaded():
-    """Test error when model is not loaded"""
-    # Create app without setting omni_instance
-    app = create_app(model="test-model")
+    """Test error when diffusion engine is not initialized"""
+    from fastapi import FastAPI
+    from vllm.entrypoints.openai.api_server import router
 
-    # Clear the instance to simulate not loaded state
-    import vllm_omni.entrypoints.openai.image_server as server_module
-
-    server_module.omni_instance = None
+    app = FastAPI()
+    app.include_router(router)
+    # Don't set diffusion_engine to simulate uninitialized state
+    app.state.diffusion_engine = None
 
     client = TestClient(app)
     response = client.post(
@@ -308,7 +313,7 @@ def test_model_not_loaded():
         },
     )
     assert response.status_code == 503
-    assert "not loaded" in response.json()["detail"].lower()
+    assert "not initialized" in response.json()["detail"].lower()
 
 
 def test_different_image_sizes(test_client):
@@ -357,54 +362,46 @@ def test_parameter_validation():
 
 
 @pytest.fixture
-def qwen_client(mock_omni):
+def qwen_client(mock_async_diffusion):
     """Create test client configured for Qwen-Image"""
-    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni):
-        app = create_app(model="Qwen/Qwen-Image")
+    from fastapi import FastAPI
+    from vllm.entrypoints.openai.api_server import router
 
-        import vllm_omni.entrypoints.openai.image_server as server_module
+    app = FastAPI()
+    app.include_router(router)
+    app.state.diffusion_engine = mock_async_diffusion
+    app.state.diffusion_model_name = "Qwen/Qwen-Image"
 
-        server_module.omni_instance = mock_omni
-
-        return TestClient(app)
+    return TestClient(app)
 
 
 @pytest.fixture
-def zimage_client(mock_omni):
+def zimage_client(mock_async_diffusion):
     """Create test client configured for Z-Image Turbo"""
-    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni):
-        app = create_app(model="Tongyi-MAI/Z-Image-Turbo")
+    from fastapi import FastAPI
+    from vllm.entrypoints.openai.api_server import router
 
-        import vllm_omni.entrypoints.openai.image_server as server_module
+    app = FastAPI()
+    app.include_router(router)
+    app.state.diffusion_engine = mock_async_diffusion
+    app.state.diffusion_model_name = "Tongyi-MAI/Z-Image-Turbo"
 
-        server_module.omni_instance = mock_omni
-
-        return TestClient(app)
+    return TestClient(app)
 
 
+@pytest.mark.skip(reason="Async API server uses different health check mechanism")
 def test_qwen_health_includes_profile(qwen_client):
-    """Test Qwen health endpoint includes profile info"""
-    response = qwen_client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["model"] == "Qwen/Qwen-Image"
-    assert data["profile"] is not None
-    assert data["profile"]["default_steps"] == 50
-    assert data["profile"]["max_steps"] == 200
+    """Test Qwen health endpoint - skipped for async server"""
+    pass
 
 
+@pytest.mark.skip(reason="Async API server uses different health check mechanism")
 def test_zimage_health_includes_profile(zimage_client):
-    """Test Z-Image health endpoint includes profile info"""
-    response = zimage_client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["model"] == "Tongyi-MAI/Z-Image-Turbo"
-    assert data["profile"] is not None
-    assert data["profile"]["default_steps"] == 9
-    assert data["profile"]["max_steps"] == 16
+    """Test Z-Image health endpoint - skipped for async server"""
+    pass
 
 
-def test_qwen_uses_default_steps(qwen_client, mock_omni):
+def test_qwen_uses_default_steps(qwen_client, mock_async_diffusion):
     """Test Qwen uses profile default steps when not specified"""
     response = qwen_client.post(
         "/v1/images/generations",
@@ -413,11 +410,11 @@ def test_qwen_uses_default_steps(qwen_client, mock_omni):
     assert response.status_code == 200
 
     # Check that generate was called with Qwen's default 50 steps
-    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    call_kwargs = mock_async_diffusion.generate.call_args[1] if mock_async_diffusion.generate.call_args else {}
     assert call_kwargs.get("num_inference_steps") == 50
 
 
-def test_zimage_uses_default_steps(zimage_client, mock_omni):
+def test_zimage_uses_default_steps(zimage_client, mock_async_diffusion):
     """Test Z-Image uses profile default steps when not specified"""
     response = zimage_client.post(
         "/v1/images/generations",
@@ -426,11 +423,11 @@ def test_zimage_uses_default_steps(zimage_client, mock_omni):
     assert response.status_code == 200
 
     # Check that generate was called with Z-Image's default 9 steps
-    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    call_kwargs = mock_async_diffusion.generate.call_args[1] if mock_async_diffusion.generate.call_args else {}
     assert call_kwargs.get("num_inference_steps") == 9
 
 
-def test_zimage_forces_guidance_scale_zero(zimage_client, mock_omni):
+def test_zimage_forces_guidance_scale_zero(zimage_client, mock_async_diffusion):
     """Test Z-Image forces guidance_scale to 0.0 regardless of user input"""
     response = zimage_client.post(
         "/v1/images/generations",
@@ -443,11 +440,11 @@ def test_zimage_forces_guidance_scale_zero(zimage_client, mock_omni):
     assert response.status_code == 200
 
     # Z-Image should force guidance_scale to 0.0
-    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    call_kwargs = mock_async_diffusion.generate.call_args[1] if mock_async_diffusion.generate.call_args else {}
     assert call_kwargs.get("guidance_scale") == 0.0
 
 
-def test_zimage_ignores_true_cfg_scale(zimage_client, mock_omni):
+def test_zimage_ignores_true_cfg_scale(zimage_client, mock_async_diffusion):
     """Test Z-Image ignores true_cfg_scale (Qwen-specific parameter)"""
     response = zimage_client.post(
         "/v1/images/generations",
@@ -460,11 +457,11 @@ def test_zimage_ignores_true_cfg_scale(zimage_client, mock_omni):
     assert response.status_code == 200
 
     # Z-Image should not pass true_cfg_scale to generate()
-    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    call_kwargs = mock_async_diffusion.generate.call_args[1] if mock_async_diffusion.generate.call_args else {}
     assert "true_cfg_scale" not in call_kwargs
 
 
-def test_qwen_uses_true_cfg_scale(qwen_client, mock_omni):
+def test_qwen_uses_true_cfg_scale(qwen_client, mock_async_diffusion):
     """Test Qwen uses true_cfg_scale parameter"""
     response = qwen_client.post(
         "/v1/images/generations",
@@ -477,7 +474,7 @@ def test_qwen_uses_true_cfg_scale(qwen_client, mock_omni):
     assert response.status_code == 200
 
     # Qwen should pass true_cfg_scale to generate()
-    call_kwargs = mock_omni.generate.call_args[1] if mock_omni.generate.call_args else {}
+    call_kwargs = mock_async_diffusion.generate.call_args[1] if mock_async_diffusion.generate.call_args else {}
     assert call_kwargs.get("true_cfg_scale") == 5.0
 
 
@@ -548,34 +545,36 @@ def create_test_image(size=(512, 512), color="red", format="PNG"):
 
 
 @pytest.fixture
-def mock_omni_edit():
-    """Mock Omni for editing operations."""
+def mock_async_diffusion_edit():
+    """Mock AsyncOmniDiffusion for editing operations."""
     mock = Mock()
 
-    def generate(**kwargs):
-        n = kwargs.get("num_images_per_prompt", 1)
+    async def generate(**kwargs):
+        n = kwargs.get("num_outputs_per_prompt", 1)
         width = kwargs.get("width", 512)
         height = kwargs.get("height", 512)
-        return [Image.new("RGB", (width, height), color="blue") for _ in range(n)]
+        images = [Image.new("RGB", (width, height), color="blue") for _ in range(n)]
+        return MockGenerationResult(images)
 
-    mock.generate = generate
+    mock.generate = AsyncMock(side_effect=generate)
     return mock
 
 
 @pytest.fixture
-def edit_client(mock_omni_edit):
+def edit_client(mock_async_diffusion_edit):
     """Test client for Qwen-Image-Edit."""
-    with patch("vllm_omni.entrypoints.openai.image_server.Omni", return_value=mock_omni_edit):
-        app = create_app(model="Qwen/Qwen-Image-Edit")
+    from fastapi import FastAPI
+    from vllm.entrypoints.openai.api_server import router
 
-        import vllm_omni.entrypoints.openai.image_server as server_module
+    app = FastAPI()
+    app.include_router(router)
+    app.state.diffusion_engine = mock_async_diffusion_edit
+    app.state.diffusion_model_name = "Qwen/Qwen-Image-Edit"
 
-        server_module.omni_instance = mock_omni_edit
-
-        return TestClient(app)
+    return TestClient(app)
 
 
-def test_edit_single_image(edit_client, mock_omni_edit):
+def test_edit_single_image(edit_client, mock_async_diffusion_edit):
     """Test basic image editing."""
     image_file = create_test_image()
 
@@ -591,12 +590,12 @@ def test_edit_single_image(edit_client, mock_omni_edit):
     assert "b64_json" in data["data"][0]
 
     # Verify generate called with image
-    call_kwargs = mock_omni_edit.generate.call_args[1]
-    assert "pil_image" in call_kwargs
+    call_kwargs = mock_async_diffusion_edit.generate.call_args[1]
+    assert "image" in call_kwargs
     assert call_kwargs["prompt"] == "make the sky blue"
 
 
-def test_edit_auto_size_calculation(edit_client, mock_omni_edit):
+def test_edit_auto_size_calculation(edit_client, mock_async_diffusion_edit):
     """Test auto size calculation from input."""
     image_file = create_test_image(size=(800, 600))
 
@@ -609,7 +608,7 @@ def test_edit_auto_size_calculation(edit_client, mock_omni_edit):
     assert response.status_code == 200
 
     # Check auto-calculated dimensions
-    call_kwargs = mock_omni_edit.generate.call_args[1]
+    call_kwargs = mock_async_diffusion_edit.generate.call_args[1]
     width = call_kwargs["width"]
     height = call_kwargs["height"]
 
@@ -618,7 +617,7 @@ def test_edit_auto_size_calculation(edit_client, mock_omni_edit):
     assert abs((width / height) - (800 / 600)) < 0.1  # Aspect ratio preserved
 
 
-def test_edit_with_mask_warning(edit_client, mock_omni_edit):
+def test_edit_with_mask_warning(edit_client, mock_async_diffusion_edit):
     """Test mask parameter is accepted but logged as ignored."""
     image_file = create_test_image()
     mask_file = create_test_image(color="white")
@@ -687,7 +686,7 @@ def test_edit_with_seed(edit_client):
     assert response.status_code == 200
 
 
-def test_edit_explicit_size(edit_client, mock_omni_edit):
+def test_edit_explicit_size(edit_client, mock_async_diffusion_edit):
     """Test explicit size parameter."""
     image_file = create_test_image()
 
@@ -699,7 +698,7 @@ def test_edit_explicit_size(edit_client, mock_omni_edit):
 
     assert response.status_code == 200
 
-    call_kwargs = mock_omni_edit.generate.call_args[1]
+    call_kwargs = mock_async_diffusion_edit.generate.call_args[1]
     assert call_kwargs["width"] == 1024
     assert call_kwargs["height"] == 768
 

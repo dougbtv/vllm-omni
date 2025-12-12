@@ -17,7 +17,6 @@ vllm serve Qwen/Qwen-Image-Edit --omni \
     --port 8092 \
     --num-gpus 1 \
     --diffusion-dtype bfloat16 \
-    --num-inference-steps 50 \
     --guidance-scale 7.5
 ```
 

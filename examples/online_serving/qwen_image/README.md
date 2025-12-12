@@ -16,7 +16,6 @@ vllm serve Qwen/Qwen-Image --omni --port 8091
 vllm serve Qwen/Qwen-Image --omni \
     --port 8091 \
     --num-gpus 1 \
-    --num-inference-steps 50 \
     --guidance-scale 7.5 \
     --diffusion-seed 42
 ```

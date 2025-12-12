@@ -887,6 +887,9 @@ class OmniOpenAIServingChat(OpenAIServingChat):
                         images.append(Image.fromarray(img_array, mode="RGBA"))
         elif hasattr(final_res, "images") and final_res.images:
             images = final_res.images
+        # Fallback to omni_outputs.images for diffusion-only outputs
+        elif omni_outputs.images:
+            images = omni_outputs.images
 
         # Convert images to base64
         image_contents = []

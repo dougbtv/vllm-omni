@@ -52,6 +52,21 @@ AUDIO_LATENT_CHANNELS = 64
 AUDIO_SAMPLE_RATE = 24000
 
 
+def ensure_ltx2_deps():
+    """Ensure LTX-2 dependencies are available, raise clear error if not."""
+    if not LTX2_AVAILABLE:
+        raise ImportError(
+            f"LTX-2 dependencies not available: {LTX2_IMPORT_ERROR}\n\n"
+            f"To install LTX-2 dependencies:\n"
+            f"  cd /home/doug/codebase/vllm-omni/references/LTX-2/packages/ltx-core\n"
+            f"  pip install -e .\n"
+            f"  cd ../ltx-pipelines\n"
+            f"  pip install -e .\n\n"
+            f"Or if available on PyPI:\n"
+            f"  pip install ltx-core ltx-pipelines"
+        )
+
+
 def get_ltx2_post_process_func(od_config: OmniDiffusionConfig):
     """Returns function to convert decoded video tensors to final output format.
 
@@ -120,55 +135,102 @@ class LTX2Pipeline(nn.Module):
 
         Args:
             od_config: Omni diffusion configuration
-            prefix: Weight prefix for loading (unused in PoC)
+            prefix: Weight prefix for loading (unused)
 
         Raises:
             ImportError: If LTX-2 dependencies are not available
         """
         super().__init__()
 
-        if not LTX2_AVAILABLE:
-            raise ImportError(
-                f"LTX-2 dependencies not available: {LTX2_IMPORT_ERROR}\n"
-                f"To use LTX2Pipeline, install ltx-core and ltx-pipelines:\n"
-                f"  cd /home/doug/codebase/vllm-omni/references/LTX-2/packages/ltx-core && pip install -e .\n"
-                f"  cd /home/doug/codebase/vllm-omni/references/LTX-2/packages/ltx-pipelines && pip install -e .\n"
-                f"Or install from PyPI if available:\n"
-                f"  pip install ltx-core ltx-pipelines"
-            )
+        # Check dependencies
+        ensure_ltx2_deps()
 
         self.od_config = od_config
         self.device = get_local_device()
         self.dtype = torch.bfloat16
 
-        # Resolve model paths
-        self.model_paths = resolve_ltx2_model_paths(od_config.model)
-        logger.info(f"LTX-2 model paths: {self.model_paths}")
-
         # Get default parameters
         self.default_params = get_default_ltx2_params()
 
-        # TODO: Initialize ModelLedger for weight loading (PoC stub)
-        # In runtime phase, this will load:
-        # - Text encoder (Gemma)
-        # - Transformer (19B parameter X0Model)
-        # - Video VAE encoder/decoder
-        # - Audio VAE decoder + vocoder
-        self.model_ledger = None  # Placeholder
+        # Resolve model paths
+        checkpoint_path = self._resolve_checkpoint_path(od_config.model)
+        gemma_root = self._resolve_gemma_path(od_config.model)
 
-        # TODO: Initialize diffusion components (PoC stub)
-        # In runtime phase, this will initialize:
-        # - Scheduler (LTX2Scheduler)
-        # - Noiser (GaussianNoiser)
-        # - Stepper (EulerDiffusionStep)
-        # - Guider (CFGGuider)
-        # - Video/audio patchifiers
-        self.pipeline_components = None  # Placeholder
+        logger.info(f"LTX-2 checkpoint: {checkpoint_path}")
+        logger.info(f"Gemma root: {gemma_root}")
 
-        logger.warning(
-            "LTX2Pipeline initialized in PoC mode. "
-            "Model loading and diffusion components are stubbed. "
-            "Full runtime implementation pending."
+        # Initialize ModelLedger (video-only, no audio)
+        self.model_ledger = ModelLedger(
+            dtype=self.dtype,
+            device=self.device,
+            checkpoint_path=checkpoint_path,
+            gemma_root_path=gemma_root,
+            loras=[],  # No LoRA support in Phase 2
+            fp8transformer=False,  # No FP8 optimization in Phase 2
+            spatial_upsampler_path=None,  # No upsampler in Phase 2 (single-stage)
+        )
+
+        logger.info("ModelLedger initialized (video-only mode)")
+
+        # Initialize pipeline components for distilled generation
+        self.pipeline_components = PipelineComponents(
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        # Initialize diffusion components
+        self.noiser = GaussianNoiser(generator=None)  # Generator set per-request
+        self.stepper = EulerDiffusionStep()
+
+        # Distilled sigma schedule (predefined for fast inference)
+        from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
+        self.distilled_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(
+            dtype=torch.float32, device=self.device
+        )
+
+        logger.info(
+            f"Pipeline components initialized. "
+            f"Using distilled sigma schedule with {len(self.distilled_sigmas)} steps (Phase 2: video-only)"
+        )
+
+    def _resolve_checkpoint_path(self, model_path: str) -> str:
+        """Resolve path to LTX-2 checkpoint file."""
+        import os
+
+        # Check if model_path is a directory
+        if os.path.isdir(model_path):
+            # Look for common checkpoint filenames
+            candidates = [
+                "checkpoint.safetensors",
+                "ltx-video-2b-v1.0.safetensors",
+                "model.safetensors",
+            ]
+            for candidate in candidates:
+                checkpoint = os.path.join(model_path, candidate)
+                if os.path.exists(checkpoint):
+                    return checkpoint
+            raise FileNotFoundError(
+                f"No LTX-2 checkpoint found in {model_path}. "
+                f"Looked for: {', '.join(candidates)}"
+            )
+        elif os.path.isfile(model_path):
+            return model_path
+        else:
+            raise FileNotFoundError(f"Model path not found: {model_path}")
+
+    def _resolve_gemma_path(self, model_path: str) -> str:
+        """Resolve path to Gemma text encoder."""
+        import os
+
+        # If model_path is a directory, look for gemma subdirectory
+        if os.path.isdir(model_path):
+            gemma_path = os.path.join(model_path, "gemma")
+            if os.path.exists(gemma_path):
+                return gemma_path
+
+        # Fall back to model_path itself or raise error
+        raise FileNotFoundError(
+            f"Gemma text encoder not found. Expected at {model_path}/gemma/"
         )
 
     def forward(
@@ -183,109 +245,125 @@ class LTX2Pipeline(nn.Module):
         Returns:
             DiffusionOutput containing generated video frames
 
-        Note:
-            PoC implementation returns placeholder output.
-            Full denoising loop will be implemented in runtime phase.
+        Raises:
+            ValueError: If enable_audio=True (not supported in Phase 2)
         """
-        # Extract parameters from request
-        prompt = req.prompt if isinstance(req.prompt, str) else req.prompt[0]
-        negative_prompt = (
-            req.negative_prompt
-            if isinstance(req.negative_prompt, str)
-            else (req.negative_prompt[0] if req.negative_prompt else "")
-        )
+        # Phase 2: Enforce video-only
+        if req.enable_audio:
+            raise ValueError(
+                "Audio generation not supported in Phase 2. "
+                "Set enable_audio=False for video-only generation."
+            )
 
-        # Get dimensions with defaults
+        # Extract and validate parameters
+        prompt = req.prompt if isinstance(req.prompt, str) else req.prompt[0]
         height = req.height if req.height is not None else self.default_params["height"]
         width = req.width if req.width is not None else self.default_params["width"]
         num_frames = (
-            req.num_frames if isinstance(req.num_frames, int) else req.num_frames[0]
-            if isinstance(req.num_frames, list)
+            req.num_frames if isinstance(req.num_frames, int)
+            else req.num_frames[0] if isinstance(req.num_frames, list)
             else self.default_params["num_frames"]
         )
 
         # Validate dimensions
-        try:
-            validate_ltx2_dimensions(height, width, num_frames)
-        except ValueError as e:
-            logger.error(f"Dimension validation failed: {e}")
-            # Continue with adjusted dimensions for PoC
-            height = (height // 32) * 32
-            width = (width // 32) * 32
-            k = (num_frames - 1) // 8
-            num_frames = 8 * k + 1
-            logger.warning(f"Adjusted dimensions: {width}x{height}, {num_frames} frames")
+        validate_ltx2_dimensions(height, width, num_frames)
 
-        # Get other parameters
-        guidance_scale = req.guidance_scale
-        num_inference_steps = req.num_inference_steps
-        seed = req.seed if req.seed is not None else 42
         batch_size = req.batch_size
+        generator = req.generator
 
         logger.info(
-            f"LTX-2 generation request: prompt='{prompt[:50]}...', "
-            f"size={width}x{height}, frames={num_frames}, "
-            f"steps={num_inference_steps}, cfg={guidance_scale}"
+            f"LTX-2 distilled generation: '{prompt[:50]}...', "
+            f"{width}x{height}, {num_frames} frames, "
+            f"8 denoising steps (distilled)"
         )
 
-        # ============================================================
-        # PoC STUB: Return placeholder output
-        # ============================================================
-        # In runtime phase, the following will be implemented:
-        # 1. Encode text prompt with Gemma → get video/audio contexts
-        # 2. Initialize noisy latents (video + audio)
-        # 3. Denoising loop (Euler sampling with CFG guidance)
-        # 4. Decode video latents with VAE
-        # 5. Decode audio latents with vocoder
-        # 6. Return DiffusionOutput with actual generated content
+        # Step 1: Encode text
+        logger.info("Step 1/5: Encoding text prompt...")
+        video_context, audio_context = self.encode_text(prompt)
 
-        logger.warning(
-            "⚠️  LTX-2 denoising loop not implemented (PoC phase). "
-            "Returning placeholder output tensor."
-        )
-
-        # Create placeholder video tensor (black frames)
-        # Shape: (batch_size, channels, num_frames, height, width)
-        placeholder_video = torch.zeros(
-            (batch_size, 3, num_frames, height, width),
-            dtype=self.dtype,
+        # Step 2: Prepare latents
+        logger.info("Step 2/5: Preparing latents...")
+        video_latents, audio_latents = self.prepare_latents(
+            batch_size=batch_size,
+            num_frames=num_frames,
+            height=height,
+            width=width,
             device=self.device,
+            dtype=self.dtype,
+            generator=generator,
         )
 
-        # TODO: Create placeholder audio tensor
-        # Shape will depend on audio duration and sample rate
-        # For now, store None in req.audio_output
+        # Step 3: Add noise to latents
+        logger.info("Step 3/5: Adding initial noise...")
+        noisy_video_latents = self.noiser.noise_latent(
+            video_latents, self.distilled_sigmas[0]
+        )
+        # Audio latents unused (video-only)
 
-        # Store in request for potential downstream use
-        req.output = placeholder_video
-        req.audio_output = None  # TODO: Add audio in runtime phase
+        # Step 4: Denoising loop
+        logger.info("Step 4/5: Running denoising loop (8 steps)...")
+        denoised_video_latents, _ = self.denoise_loop(
+            video_latents=noisy_video_latents,
+            audio_latents=audio_latents,
+            video_context=video_context,
+            audio_context=audio_context,
+            sigmas=self.distilled_sigmas,
+        )
+
+        # Step 5: Decode video
+        logger.info("Step 5/5: Decoding video...")
+        decoded_video = self.decode_video(denoised_video_latents)
+
+        # Store in request output field
+        req.output = decoded_video
+
+        logger.info("✓ Generation complete!")
 
         # Return DiffusionOutput
         return DiffusionOutput(
-            output=placeholder_video,
+            output=decoded_video,
         )
 
     def encode_text(
         self,
         prompt: str,
-        negative_prompt: str,
+        negative_prompt: str | None = None,
     ):
         """Encode text prompts using Gemma text encoder.
 
         Args:
             prompt: Positive text prompt
-            negative_prompt: Negative text prompt for CFG
+            negative_prompt: Negative prompt (unused in Phase 2 - no CFG)
 
         Returns:
-            Tuple of (video_context_positive, audio_context_positive,
-                     video_context_negative, audio_context_negative)
+            Tuple of (video_context, audio_context)
+            Note: audio_context is returned but not used in video-only generation
 
         Note:
-            Stubbed in PoC. Full implementation in runtime phase.
+            Phase 2 implementation does NOT support CFG (no negative prompt).
+            Negative prompt support will be added in Phase 3.
         """
-        # TODO: Implement Gemma text encoding
-        logger.debug(f"encode_text called (stub): prompt='{prompt[:50]}...'")
-        return None
+        # Load text encoder
+        text_encoder = self.model_ledger.text_encoder()
+
+        try:
+            # Encode prompt (returns list of (v_context, a_context) tuples)
+            contexts = encode_text(text_encoder, prompts=[prompt])
+            video_context, audio_context = contexts[0]
+
+            logger.debug(
+                f"Text encoded: video_context shape={video_context.shape}, "
+                f"audio_context shape={audio_context.shape}"
+            )
+
+            return video_context, audio_context
+
+        finally:
+            # Clean up text encoder immediately to save memory
+            torch.cuda.synchronize()
+            del text_encoder
+            from ltx_pipelines.utils.helpers import cleanup_memory
+            cleanup_memory()
 
     def prepare_latents(
         self,
@@ -302,56 +380,215 @@ class LTX2Pipeline(nn.Module):
         Args:
             batch_size: Batch size
             num_frames: Number of video frames
-            height: Video height
-            width: Video width
+            height: Video height (pixels)
+            width: Video width (pixels)
             device: Torch device
             dtype: Torch dtype
             generator: Random generator for reproducibility
 
         Returns:
             Tuple of (video_latents, audio_latents)
-
-        Note:
-            Stubbed in PoC. Full implementation in runtime phase.
+            Note: audio_latents is returned but not used in video-only generation
         """
-        # TODO: Calculate latent dimensions based on scale factors
-        # video_latent_shape = (batch_size, VIDEO_LATENT_CHANNELS,
-        #                       num_frames // 8, height // 32, width // 32)
-        # audio_latent_shape = (batch_size, AUDIO_LATENT_CHANNELS, ...)
+        # Calculate video latent dimensions
+        # LTX-2 VAE: 8x temporal compression, 32x spatial compression
+        latent_num_frames = num_frames // VIDEO_SCALE_FACTORS["time"]
+        latent_height = height // VIDEO_SCALE_FACTORS["height"]
+        latent_width = width // VIDEO_SCALE_FACTORS["width"]
 
-        logger.debug("prepare_latents called (stub)")
-        return None, None
+        # Create random video latents
+        video_latent_shape = (
+            batch_size,
+            VIDEO_LATENT_CHANNELS,  # 128 channels
+            latent_num_frames,
+            latent_height,
+            latent_width,
+        )
+
+        video_latents = torch.randn(
+            video_latent_shape,
+            generator=generator,
+            device=device,
+            dtype=dtype,
+        )
+
+        # Create dummy audio latents (not used in video-only generation)
+        # Audio latent shape calculation would be here, but we'll create minimal placeholder
+        audio_latent_shape = (batch_size, AUDIO_LATENT_CHANNELS, latent_num_frames)
+        audio_latents = torch.zeros(  # Zero placeholder since we won't use it
+            audio_latent_shape,
+            device=device,
+            dtype=dtype,
+        )
+
+        logger.debug(
+            f"Latents initialized: video={video_latent_shape}, "
+            f"audio={audio_latent_shape} (audio unused in video-only mode)"
+        )
+
+        return video_latents, audio_latents
 
     def denoise_loop(
         self,
         video_latents: torch.Tensor,
         audio_latents: torch.Tensor,
-        prompt_embeds,
-        timesteps: torch.Tensor,
-        guidance_scale: float,
+        video_context: torch.Tensor,
+        audio_context: torch.Tensor,
+        sigmas: torch.Tensor,
     ):
-        """Execute denoising loop with Euler sampling and CFG guidance.
+        """Execute denoising loop with distilled sigma schedule.
 
         Args:
             video_latents: Initial noisy video latents
-            audio_latents: Initial noisy audio latents
-            prompt_embeds: Text conditioning embeddings
-            timesteps: Diffusion timesteps (sigmas)
-            guidance_scale: CFG guidance scale
+            audio_latents: Initial noisy audio latents (unused in video-only)
+            video_context: Text conditioning for video
+            audio_context: Text conditioning for audio (unused in video-only)
+            sigmas: Predefined sigma schedule (DISTILLED_SIGMA_VALUES)
 
         Returns:
             Tuple of (denoised_video_latents, denoised_audio_latents)
 
         Note:
-            TODO: Implement full denoising loop in runtime phase.
-            This will use:
-            - LTX2Scheduler for sigma schedule
-            - EulerDiffusionStep for sampling steps
-            - CFGGuider for classifier-free guidance
-            - Transformer forward passes for noise prediction
+            Phase 2 implementation:
+            - Uses simple denoising (no CFG)
+            - Video-only (audio modality disabled)
+            - Distilled sigma schedule (8 steps)
         """
-        logger.debug("denoise_loop called (stub) - returning placeholder")
-        return video_latents, audio_latents
+        from ltx_pipelines.utils.helpers import post_process_latent
+        from ltx_core.types import LatentState
+        from dataclasses import replace
+        from tqdm import tqdm
+
+        # Load transformer
+        transformer = self.model_ledger.transformer()
+
+        try:
+            # Create video state
+            video_state = LatentState(
+                latent=video_latents,
+                denoise_mask=None,
+                clean_latent=None,
+            )
+
+            # Create audio state (disabled for video-only)
+            audio_state = LatentState(
+                latent=audio_latents,
+                denoise_mask=None,
+                clean_latent=None,
+            )
+
+            # Denoising loop (iterate all sigmas except last)
+            for step_idx in tqdm(range(len(sigmas) - 1), desc="Denoising"):
+                sigma = sigmas[step_idx]
+
+                # Create video modality input
+                video_modality = self._create_video_modality(
+                    video_state.latent, video_context, sigma
+                )
+
+                # Create audio modality input (DISABLED for video-only)
+                audio_modality = self._create_audio_modality(
+                    audio_state.latent, audio_context, sigma, enabled=False
+                )
+
+                # Transformer forward pass
+                denoised_video, denoised_audio = transformer(
+                    video=video_modality,
+                    audio=audio_modality,
+                    perturbations=None,
+                )
+
+                # Post-process (handle masks and clean latents if present)
+                denoised_video = post_process_latent(
+                    denoised_video,
+                    video_state.denoise_mask,
+                    video_state.clean_latent,
+                )
+
+                # Euler step to advance noise level
+                video_state = replace(
+                    video_state,
+                    latent=self.stepper.step(
+                        video_state.latent, denoised_video, sigmas, step_idx
+                    ),
+                )
+
+            return video_state.latent, audio_state.latent
+
+        finally:
+            # Clean up transformer to save memory
+            torch.cuda.synchronize()
+            del transformer
+            from ltx_pipelines.utils.helpers import cleanup_memory
+            cleanup_memory()
+
+    def _create_video_modality(
+        self,
+        latent: torch.Tensor,
+        context: torch.Tensor,
+        sigma: float,
+    ):
+        """Create video modality input for transformer."""
+        from ltx_pipelines.utils.helpers import modality_from_latent_state
+        from ltx_core.types import LatentState
+
+        # Create temporary LatentState for helper function
+        temp_state = LatentState(latent=latent, denoise_mask=None, clean_latent=None)
+
+        # Use upstream helper to create modality
+        modality = modality_from_latent_state(temp_state, context, sigma)
+
+        return modality
+
+    def _create_audio_modality(
+        self,
+        latent: torch.Tensor,
+        context: torch.Tensor,
+        sigma: float,
+        enabled: bool = False,
+    ):
+        """Create audio modality input for transformer (disabled in video-only mode)."""
+        from ltx_pipelines.utils.helpers import modality_from_latent_state
+        from ltx_core.types import LatentState
+
+        # Create temporary LatentState
+        temp_state = LatentState(latent=latent, denoise_mask=None, clean_latent=None)
+
+        # Create modality but mark as disabled
+        modality = modality_from_latent_state(temp_state, context, sigma)
+        modality.enabled = enabled  # Set to False for video-only
+
+        return modality
+
+    def decode_video(
+        self,
+        video_latents: torch.Tensor,
+    ):
+        """Decode video latents to pixel space.
+
+        Args:
+            video_latents: Latent tensor from denoising loop
+
+        Returns:
+            Decoded video tensor (B, C, T, H, W)
+        """
+        # Load video decoder
+        video_decoder = self.model_ledger.video_decoder()
+
+        try:
+            # Decode latents to pixels
+            decoded_video = vae_decode_video(video_latents, video_decoder)
+
+            logger.debug(f"Video decoded: shape={decoded_video.shape}")
+
+            return decoded_video
+
+        finally:
+            # Clean up decoder
+            torch.cuda.synchronize()
+            del video_decoder
+            from ltx_pipelines.utils.helpers import cleanup_memory
+            cleanup_memory()
 
     def load_weights(
         self,

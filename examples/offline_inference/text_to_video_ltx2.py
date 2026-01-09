@@ -32,7 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="Lightricks/LTX-Video",
-        help="LTX-2 model ID or local path to model directory",
+        help=(
+            "Path to LTX-2 model directory containing:\n"
+            "  - checkpoint.safetensors (or ltx-video-2b-v1.0.safetensors)\n"
+            "  - gemma/ (text encoder directory)\n"
+            "Example: /path/to/LTX-Video-2B-v1.0/"
+        ),
     )
 
     # Generation parameters
@@ -57,20 +62,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--height",
         type=int,
-        default=512,
+        default=384,
         help="Video height (must be divisible by 32)",
     )
     parser.add_argument(
         "--width",
         type=int,
-        default=768,
+        default=512,
         help="Video width (must be divisible by 32)",
     )
     parser.add_argument(
         "--num_frames",
         type=int,
-        default=121,
-        help="Number of frames (must be 8K+1, e.g., 121 = 8*15+1)",
+        default=49,
+        help="Number of frames (must be 8K+1, e.g., 49 = 8*6+1)",
     )
     parser.add_argument(
         "--fps",
@@ -97,8 +102,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable_audio",
         action="store_true",
-        default=True,
-        help="Generate audio track (LTX-2 feature)",
+        default=False,
+        help="Generate audio track (NOT SUPPORTED in Phase 2)",
     )
     parser.add_argument(
         "--no_audio",
@@ -129,13 +134,19 @@ def main():
     # Create random generator
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
+    # Validate audio setting for Phase 2
+    if args.enable_audio:
+        print("\n⚠️  WARNING: Audio generation not supported in Phase 2")
+        print("   Set --no_audio to suppress this warning")
+        print("   Disabling audio for this run\n")
+        args.enable_audio = False
+
     print("\n" + "=" * 70)
-    print("LTX-2 Video Generation Example (PoC)")
+    print("LTX-2 Video Generation (Phase 2: Distilled, Video-Only)")
     print("=" * 70)
     print(f"Prompt: {args.prompt}")
     print(f"Dimensions: {args.width}x{args.height}, {args.num_frames} frames @ {args.fps} fps")
-    print(f"Steps: {args.num_inference_steps}, CFG: {args.guidance_scale}")
-    print(f"Audio: {'Enabled' if args.enable_audio else 'Disabled'}")
+    print(f"Mode: Distilled (8 steps, video-only)")
     print("=" * 70 + "\n")
 
     # Initialize Omni with LTX-2 model
@@ -161,8 +172,7 @@ def main():
         return
 
     # Generate video
-    print("Generating video...")
-    print("⚠️  Note: This is a PoC implementation - placeholder output will be generated\n")
+    print("Generating video...\n")
 
     try:
         frames = omni.generate(
@@ -262,16 +272,14 @@ def main():
     export_to_video(video_array, str(output_path), fps=args.fps)
     print(f"\n✓ Video saved to: {output_path}")
 
-    # Note about audio
-    if args.enable_audio:
-        print("⚠️  Audio generation not yet implemented (PoC phase)")
-        print("   Full audio support will be added in runtime implementation")
-
     print("\n" + "=" * 70)
     print("Generation complete!")
     print("=" * 70)
-    print("\nNote: This PoC returns placeholder (black) frames.")
-    print("Full video generation will be implemented in the next phase.")
+    print("\nPhase 2 Implementation Notes:")
+    print("- Video-only generation (distilled, 8-step denoising)")
+    print("- Audio support deferred to Phase 3")
+    print("- CFG guidance deferred to Phase 4")
+    print("- Two-stage upsampling deferred to Phase 5")
     print("=" * 70 + "\n")
 
 

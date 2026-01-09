@@ -157,6 +157,12 @@ class OmniDiffusionRequest:
     # debugging
     debug: bool = False
 
+    # LTX-2 specific fields
+    enable_audio: bool = True  # Generate audio track (for audio-video models)
+    conditioning_images: list[tuple[str, int, float]] | None = None  # Image conditioning: [(path, frame_idx, strength)]
+    enhance_prompt: bool = False  # Use text encoder to enhance prompt
+    audio_output: torch.Tensor | None = None  # Decoded audio tensor storage
+
     # results
     output: torch.Tensor | None = None
 

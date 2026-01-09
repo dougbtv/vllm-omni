@@ -110,6 +110,11 @@ _DIFFUSION_MODELS = {
         "pipeline_omnigen2",
         "OmniGen2Pipeline",
     ),
+    "LTX2Pipeline": (
+        "ltx_2",
+        "pipeline_ltx2",
+        "LTX2Pipeline",
+    ),
 }
 
 
@@ -296,6 +301,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "NextStep11Pipeline": "get_nextstep11_post_process_func",
     "FluxPipeline": "get_flux_post_process_func",
     "OmniGen2Pipeline": "get_omnigen2_post_process_func",
+    "LTX2Pipeline": "get_ltx2_post_process_func",
 }
 
 _DIFFUSION_PRE_PROCESS_FUNCS = {

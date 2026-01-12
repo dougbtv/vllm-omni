@@ -88,19 +88,33 @@ def get_ltx2_post_process_func(od_config: OmniDiffusionConfig):
         """Post-process video frames.
 
         Args:
-            video: Decoded video tensor (B, C, T, H, W) or (B, T, H, W, C)
+            video: Decoded video tensor
+                - From vae_decode_video: [f, h, w, c] uint8 (already converted)
+                - From latent decode: [B, C, T, H, W] float (needs conversion)
             output_type: "np" for numpy array, "latent" for raw tensor
 
         Returns:
             Processed video frames (numpy array or list of PIL images)
 
         Note:
-            Audio handling will be added in runtime phase.
-            For PoC, only video frames are processed.
+            LTX-2's vae_decode_video returns uint8 tensors in [f, h, w, c] format,
+            already converted to [0, 255] range. No further processing needed.
         """
         if output_type == "latent":
             return video
 
+        # Check if video is already uint8 in [f, h, w, c] format (from vae_decode_video)
+        if video.dtype == torch.uint8 and video.ndim == 4:
+            # Already converted by vae_decode_video, just convert to numpy
+            if output_type == "np":
+                return video.cpu().numpy()
+            else:
+                # For PIL, convert frames to list of PIL images
+                import PIL.Image
+                frames = video.cpu().numpy()
+                return [PIL.Image.fromarray(frame) for frame in frames]
+
+        # Otherwise, use VideoProcessor for float tensors
         return video_processor.postprocess_video(video, output_type=output_type)
 
     return post_process_func
@@ -441,24 +455,44 @@ class LTX2Pipeline(nn.Module):
             device=self.device,
             dtype=self.dtype,
             generator=generator,
+            fps=req.fps if hasattr(req, 'fps') and req.fps else 24.0,
         )
 
-        # Step 3: Add noise to latents
-        logger.info("Step 3/5: Adding initial noise...")
-        noisy_video_latents = self.noiser.noise_latent(
-            video_latents, self.distilled_sigmas[0]
+        # Step 3: Create and noise latent states using tools
+        logger.info("Step 3/5: Creating and noising latent states...")
+        from ltx_core.types import LatentState
+
+        # Create properly structured video state using tools
+        video_state = self.video_tools.create_initial_state(
+            device=self.device,
+            dtype=self.dtype,
+            initial_latent=video_latents,
         )
-        # Audio latents unused (video-only)
+
+        # Create properly structured audio state using tools
+        audio_state = self.audio_tools.create_initial_state(
+            device=self.device,
+            dtype=self.dtype,
+            initial_latent=audio_latents,
+        )
+
+        # Add noise using GaussianNoiser (callable)
+        video_state = self.noiser(video_state, noise_scale=self.distilled_sigmas[0].item())
+        # Audio state unused in video-only mode
 
         # Step 4: Denoising loop
         logger.info("Step 4/5: Running denoising loop (8 steps)...")
-        denoised_video_latents, _ = self.denoise_loop(
-            video_latents=noisy_video_latents,
-            audio_latents=audio_latents,
+        video_state, _ = self.denoise_loop(
+            video_state=video_state,
+            audio_state=audio_state,
             video_context=video_context,
             audio_context=audio_context,
             sigmas=self.distilled_sigmas,
         )
+
+        # Unpatchify the video state to get back to (B, C, T, H, W) format
+        video_state = self.video_tools.unpatchify(video_state)
+        denoised_video_latents = video_state.latent
 
         # Step 5: Decode video
         logger.info("Step 5/5: Decoding video...")
@@ -524,8 +558,9 @@ class LTX2Pipeline(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
         generator: torch.Generator | None = None,
+        fps: float = 24.0,
     ):
-        """Initialize random latents for video and audio.
+        """Initialize random latents for video and audio using VideoLatentTools.
 
         Args:
             batch_size: Batch size
@@ -535,38 +570,62 @@ class LTX2Pipeline(nn.Module):
             device: Torch device
             dtype: Torch dtype
             generator: Random generator for reproducibility
+            fps: Frames per second
 
         Returns:
             Tuple of (video_latents, audio_latents)
             Note: audio_latents is returned but not used in video-only generation
         """
-        # Calculate video latent dimensions
-        # LTX-2 VAE: 8x temporal compression, 32x spatial compression
-        latent_num_frames = num_frames // VIDEO_SCALE_FACTORS["time"]
-        latent_height = height // VIDEO_SCALE_FACTORS["height"]
-        latent_width = width // VIDEO_SCALE_FACTORS["width"]
+        from ltx_core.tools import VideoLatentTools, AudioLatentTools
+        from ltx_core.types import VideoPixelShape, VideoLatentShape, AudioLatentShape, SpatioTemporalScaleFactors
 
-        # Create random video latents
-        video_latent_shape = (
-            batch_size,
-            VIDEO_LATENT_CHANNELS,  # 128 channels
-            latent_num_frames,
-            latent_height,
-            latent_width,
+        # Create video pixel shape
+        video_pixel_shape = VideoPixelShape(
+            batch=batch_size,
+            frames=num_frames,
+            height=height,
+            width=width,
+            fps=fps,
         )
 
+        # Get default scale factors (8x temporal, 32x spatial compression)
+        scale_factors = SpatioTemporalScaleFactors.default()
+
+        # Create video latent shape
+        video_latent_shape = VideoLatentShape.from_pixel_shape(
+            shape=video_pixel_shape,
+            latent_channels=VIDEO_LATENT_CHANNELS,
+            scale_factors=scale_factors,
+        )
+
+        # Create VideoLatentTools for proper initialization
+        video_tools = VideoLatentTools(
+            patchifier=self.pipeline_components.video_patchifier,
+            target_shape=video_latent_shape,
+            fps=fps,
+            scale_factors=scale_factors,
+        )
+
+        # Create random video latents
         video_latents = torch.randn(
-            video_latent_shape,
+            video_latent_shape.to_torch_shape(),
             generator=generator,
             device=device,
             dtype=dtype,
         )
 
+        # Create audio latent shape
+        audio_latent_shape = AudioLatentShape.from_video_pixel_shape(video_pixel_shape)
+
+        # Create AudioLatentTools
+        audio_tools = AudioLatentTools(
+            patchifier=self.pipeline_components.audio_patchifier,
+            target_shape=audio_latent_shape,
+        )
+
         # Create dummy audio latents (not used in video-only generation)
-        # Audio latent shape calculation would be here, but we'll create minimal placeholder
-        audio_latent_shape = (batch_size, AUDIO_LATENT_CHANNELS, latent_num_frames)
-        audio_latents = torch.zeros(  # Zero placeholder since we won't use it
-            audio_latent_shape,
+        audio_latents = torch.zeros(
+            audio_latent_shape.to_torch_shape(),
             device=device,
             dtype=dtype,
         )
@@ -576,12 +635,16 @@ class LTX2Pipeline(nn.Module):
             f"audio={audio_latent_shape} (audio unused in video-only mode)"
         )
 
+        # Store tools for use in denoise_loop
+        self.video_tools = video_tools
+        self.audio_tools = audio_tools
+
         return video_latents, audio_latents
 
     def denoise_loop(
         self,
-        video_latents: torch.Tensor,
-        audio_latents: torch.Tensor,
+        video_state: LatentState,
+        audio_state: LatentState,
         video_context: torch.Tensor,
         audio_context: torch.Tensor,
         sigmas: torch.Tensor,
@@ -589,14 +652,14 @@ class LTX2Pipeline(nn.Module):
         """Execute denoising loop with distilled sigma schedule.
 
         Args:
-            video_latents: Initial noisy video latents
-            audio_latents: Initial noisy audio latents (unused in video-only)
+            video_state: Initial noisy video latent state (patchified)
+            audio_state: Initial noisy audio latent state (patchified, unused in video-only)
             video_context: Text conditioning for video
             audio_context: Text conditioning for audio (unused in video-only)
             sigmas: Predefined sigma schedule (DISTILLED_SIGMA_VALUES)
 
         Returns:
-            Tuple of (denoised_video_latents, denoised_audio_latents)
+            Tuple of (denoised_video_state, denoised_audio_state)
 
         Note:
             Phase 2 implementation:
@@ -613,33 +676,17 @@ class LTX2Pipeline(nn.Module):
         transformer = self.model_ledger.transformer()
 
         try:
-            # Create video state
-            video_state = LatentState(
-                latent=video_latents,
-                denoise_mask=None,
-                clean_latent=None,
-            )
-
-            # Create audio state (disabled for video-only)
-            audio_state = LatentState(
-                latent=audio_latents,
-                denoise_mask=None,
-                clean_latent=None,
-            )
 
             # Denoising loop (iterate all sigmas except last)
             for step_idx in tqdm(range(len(sigmas) - 1), desc="Denoising"):
                 sigma = sigmas[step_idx]
 
-                # Create video modality input
-                video_modality = self._create_video_modality(
-                    video_state.latent, video_context, sigma
-                )
+                # Create video modality input using the video_state directly
+                from ltx_pipelines.utils.helpers import modality_from_latent_state
+                video_modality = modality_from_latent_state(video_state, video_context, sigma)
 
-                # Create audio modality input (DISABLED for video-only)
-                audio_modality = self._create_audio_modality(
-                    audio_state.latent, audio_context, sigma, enabled=False
-                )
+                # Audio modality is None for video-only mode (Phase 2)
+                audio_modality = None
 
                 # Transformer forward pass
                 denoised_video, denoised_audio = transformer(
@@ -663,7 +710,7 @@ class LTX2Pipeline(nn.Module):
                     ),
                 )
 
-            return video_state.latent, audio_state.latent
+            return video_state, audio_state
 
         finally:
             # Clean up transformer to save memory
@@ -677,13 +724,19 @@ class LTX2Pipeline(nn.Module):
         latent: torch.Tensor,
         context: torch.Tensor,
         sigma: float,
+        positions: torch.Tensor,
     ):
         """Create video modality input for transformer."""
         from ltx_pipelines.utils.helpers import modality_from_latent_state
         from ltx_core.types import LatentState
 
         # Create temporary LatentState for helper function
-        temp_state = LatentState(latent=latent, denoise_mask=None, clean_latent=None)
+        temp_state = LatentState(
+            latent=latent,
+            denoise_mask=torch.ones_like(latent[:, :1]),
+            positions=positions,
+            clean_latent=torch.zeros_like(latent),
+        )
 
         # Use upstream helper to create modality
         modality = modality_from_latent_state(temp_state, context, sigma)
@@ -695,6 +748,7 @@ class LTX2Pipeline(nn.Module):
         latent: torch.Tensor,
         context: torch.Tensor,
         sigma: float,
+        positions: torch.Tensor,
         enabled: bool = False,
     ):
         """Create audio modality input for transformer (disabled in video-only mode)."""
@@ -702,7 +756,12 @@ class LTX2Pipeline(nn.Module):
         from ltx_core.types import LatentState
 
         # Create temporary LatentState
-        temp_state = LatentState(latent=latent, denoise_mask=None, clean_latent=None)
+        temp_state = LatentState(
+            latent=latent,
+            denoise_mask=torch.ones_like(latent[:, :1]),
+            positions=positions,
+            clean_latent=torch.zeros_like(latent),
+        )
 
         # Create modality but mark as disabled
         modality = modality_from_latent_state(temp_state, context, sigma)
@@ -735,8 +794,18 @@ class LTX2Pipeline(nn.Module):
                 video_decoder.use_tiling = getattr(self.od_config, "vae_use_tiling", False)
                 logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
 
-            # Decode latents to pixels
-            decoded_video = vae_decode_video(video_latents, video_decoder)
+            # Decode latents to pixels (returns generator of chunks)
+            video_chunks = vae_decode_video(video_latents, video_decoder)
+
+            # Collect all chunks (typically just one chunk for non-tiled decoding)
+            frames_list = list(video_chunks)
+
+            # Concatenate chunks if multiple, otherwise use the single chunk
+            if len(frames_list) == 1:
+                decoded_video = frames_list[0]
+            else:
+                # Multiple chunks: concatenate along temporal dimension
+                decoded_video = torch.cat(frames_list, dim=0)
 
             logger.debug(f"Video decoded: shape={decoded_video.shape}")
 

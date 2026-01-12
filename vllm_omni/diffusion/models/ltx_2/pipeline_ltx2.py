@@ -193,14 +193,96 @@ class LTX2Pipeline(nn.Module):
             f"Using distilled sigma schedule with {len(self.distilled_sigmas)} steps (Phase 2: video-only)"
         )
 
+    @property
+    def vae(self):
+        """Compatibility property for registry VAE configuration checks.
+
+        LTX2Pipeline uses ModelLedger for dynamic component loading,
+        so we return None to skip VAE configuration in the registry.
+        VAE memory settings are configured directly in decode_video()
+        when the decoder is loaded from ModelLedger.
+        """
+        return None
+
     def _resolve_checkpoint_path(self, model_path: str) -> str:
         """Resolve path to LTX-2 checkpoint file."""
         import os
+
+        # If it's a HuggingFace repo ID, try to find it in cache first
+        if "/" in model_path and not os.path.exists(model_path):
+            # Try common HF cache locations
+            cache_candidates = []
+
+            # Check HUGGINGFACE_HUB_CACHE env var
+            hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+            if hf_cache:
+                # New format: models--namespace--model
+                cache_candidates.append(os.path.join(hf_cache, f"models--{model_path.replace('/', '--')}"))
+                # Old format: namespace_model (with underscore)
+                cache_candidates.append(os.path.join(hf_cache, model_path.replace('/', '_')))
+
+            # Check HF_HOME env var
+            hf_home = os.environ.get("HF_HOME")
+            if hf_home:
+                cache_candidates.append(os.path.join(hf_home, "hub", f"models--{model_path.replace('/', '--')}"))
+                cache_candidates.append(os.path.join(hf_home, "hub", model_path.replace('/', '_')))
+
+            # Default HF cache location
+            home = os.path.expanduser("~")
+            cache_candidates.append(os.path.join(home, ".cache", "huggingface", "hub", f"models--{model_path.replace('/', '--')}"))
+            cache_candidates.append(os.path.join(home, ".cache", "huggingface", "hub", model_path.replace('/', '_')))
+
+            # Try to find existing cache
+            checkpoint_candidates = [
+                "ltx-2-19b-distilled.safetensors",
+                "checkpoint.safetensors",
+                "ltx-video-2b-v1.0.safetensors",
+                "model.safetensors",
+            ]
+
+            for cache_path in cache_candidates:
+                if os.path.isdir(cache_path):
+                    # For new format, check if it has snapshots
+                    snapshots = os.path.join(cache_path, "snapshots")
+                    if os.path.isdir(snapshots):
+                        # Get latest snapshot
+                        snapshot_dirs = [d for d in os.listdir(snapshots) if os.path.isdir(os.path.join(snapshots, d))]
+                        if snapshot_dirs:
+                            candidate_path = os.path.join(snapshots, snapshot_dirs[0])
+                            # Verify it has checkpoint files
+                            has_checkpoint = any(os.path.exists(os.path.join(candidate_path, ckpt)) for ckpt in checkpoint_candidates)
+                            if has_checkpoint:
+                                model_path = candidate_path
+                                logger.info(f"Found cached model at: {model_path}")
+                                break
+                            else:
+                                logger.debug(f"Skipping {candidate_path} - no checkpoint files found")
+                    else:
+                        # Old format - verify it has checkpoint files
+                        has_checkpoint = any(os.path.exists(os.path.join(cache_path, ckpt)) for ckpt in checkpoint_candidates)
+                        if has_checkpoint:
+                            model_path = cache_path
+                            logger.info(f"Found cached model at: {model_path}")
+                            break
+                        else:
+                            logger.debug(f"Skipping {cache_path} - no checkpoint files found")
+            else:
+                # Not found in cache, try to download
+                logger.info(f"Model not found in cache, attempting download: {model_path}")
+                from huggingface_hub import snapshot_download
+                try:
+                    local_dir = snapshot_download(model_path, allow_patterns=["*.safetensors", "*.json", "gemma/**"])
+                    model_path = local_dir
+                except Exception as e:
+                    raise FileNotFoundError(
+                        f"Failed to download model from HuggingFace: {model_path}. Error: {e}"
+                    ) from e
 
         # Check if model_path is a directory
         if os.path.isdir(model_path):
             # Look for common checkpoint filenames
             candidates = [
+                "ltx-2-19b-distilled.safetensors",  # Distilled checkpoint
                 "checkpoint.safetensors",
                 "ltx-video-2b-v1.0.safetensors",
                 "model.safetensors",
@@ -208,6 +290,7 @@ class LTX2Pipeline(nn.Module):
             for candidate in candidates:
                 checkpoint = os.path.join(model_path, candidate)
                 if os.path.exists(checkpoint):
+                    logger.info(f"Found checkpoint: {checkpoint}")
                     return checkpoint
             raise FileNotFoundError(
                 f"No LTX-2 checkpoint found in {model_path}. "
@@ -222,15 +305,82 @@ class LTX2Pipeline(nn.Module):
         """Resolve path to Gemma text encoder."""
         import os
 
-        # If model_path is a directory, look for gemma subdirectory
+        # If it's a HuggingFace repo ID, try to find it in cache first
+        if "/" in model_path and not os.path.exists(model_path):
+            # Try common HF cache locations
+            cache_candidates = []
+
+            # Check HUGGINGFACE_HUB_CACHE env var
+            hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+            if hf_cache:
+                cache_candidates.append(os.path.join(hf_cache, f"models--{model_path.replace('/', '--')}"))
+                cache_candidates.append(os.path.join(hf_cache, model_path.replace('/', '_')))
+
+            # Check HF_HOME env var
+            hf_home = os.environ.get("HF_HOME")
+            if hf_home:
+                cache_candidates.append(os.path.join(hf_home, "hub", f"models--{model_path.replace('/', '--')}"))
+                cache_candidates.append(os.path.join(hf_home, "hub", model_path.replace('/', '_')))
+
+            # Default HF cache location
+            home = os.path.expanduser("~")
+            cache_candidates.append(os.path.join(home, ".cache", "huggingface", "hub", f"models--{model_path.replace('/', '--')}"))
+            cache_candidates.append(os.path.join(home, ".cache", "huggingface", "hub", model_path.replace('/', '_')))
+
+            # Try to find existing cache
+            encoder_dirs = ["text_encoder", "gemma"]
+
+            for cache_path in cache_candidates:
+                if os.path.isdir(cache_path):
+                    # For new format, check if it has snapshots
+                    snapshots = os.path.join(cache_path, "snapshots")
+                    if os.path.isdir(snapshots):
+                        # Get latest snapshot
+                        snapshot_dirs = [d for d in os.listdir(snapshots) if os.path.isdir(os.path.join(snapshots, d))]
+                        if snapshot_dirs:
+                            candidate_path = os.path.join(snapshots, snapshot_dirs[0])
+                            # Verify it has text encoder directory
+                            has_encoder = any(os.path.isdir(os.path.join(candidate_path, enc)) for enc in encoder_dirs)
+                            if has_encoder:
+                                model_path = candidate_path
+                                logger.info(f"Found cached model for Gemma at: {model_path}")
+                                break
+                            else:
+                                logger.debug(f"Skipping {candidate_path} - no text encoder directory found")
+                    else:
+                        # Old format - verify it has text encoder directory
+                        has_encoder = any(os.path.isdir(os.path.join(cache_path, enc)) for enc in encoder_dirs)
+                        if has_encoder:
+                            model_path = cache_path
+                            logger.info(f"Found cached model for Gemma at: {model_path}")
+                            break
+                        else:
+                            logger.debug(f"Skipping {cache_path} - no text encoder directory found")
+            else:
+                # Not found in cache, try to download
+                logger.info(f"Model not found in cache for Gemma, attempting download: {model_path}")
+                from huggingface_hub import snapshot_download
+                try:
+                    local_dir = snapshot_download(model_path, allow_patterns=["*.safetensors", "*.json", "gemma/**"])
+                    model_path = local_dir
+                except Exception as e:
+                    raise FileNotFoundError(
+                        f"Failed to download model from HuggingFace: {model_path}. Error: {e}"
+                    ) from e
+
+        # If model_path is a directory, look for text encoder subdirectory
         if os.path.isdir(model_path):
-            gemma_path = os.path.join(model_path, "gemma")
-            if os.path.exists(gemma_path):
-                return gemma_path
+            # Try both "text_encoder" and "gemma" (different model versions use different names)
+            for encoder_dir in ["text_encoder", "gemma"]:
+                encoder_path = os.path.join(model_path, encoder_dir)
+                if os.path.exists(encoder_path):
+                    logger.info(f"Found text encoder at: {encoder_path}")
+                    # Return the parent directory as gemma_root (it should contain both text_encoder/ and tokenizer/)
+                    return model_path
 
         # Fall back to model_path itself or raise error
         raise FileNotFoundError(
-            f"Gemma text encoder not found. Expected at {model_path}/gemma/"
+            f"Gemma text encoder not found. Expected at {model_path}/text_encoder/ or {model_path}/gemma/"
         )
 
     def forward(
@@ -576,6 +726,15 @@ class LTX2Pipeline(nn.Module):
         video_decoder = self.model_ledger.video_decoder()
 
         try:
+            # Configure VAE memory optimization settings if available
+            # These help reduce VRAM usage for large videos
+            if hasattr(video_decoder, "use_slicing"):
+                video_decoder.use_slicing = getattr(self.od_config, "vae_use_slicing", True)
+                logger.debug(f"VAE slicing enabled: {video_decoder.use_slicing}")
+            if hasattr(video_decoder, "use_tiling"):
+                video_decoder.use_tiling = getattr(self.od_config, "vae_use_tiling", False)
+                logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
+
             # Decode latents to pixels
             decoded_video = vae_decode_video(video_latents, video_decoder)
 

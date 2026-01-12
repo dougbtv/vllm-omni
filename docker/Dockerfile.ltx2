@@ -1,0 +1,38 @@
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai
+ARG VLLM_BASE_TAG=v0.12.0
+FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG}
+
+ARG APP_DIR=/workspace/vllm-omni
+WORKDIR ${APP_DIR}
+
+# --- Create a non-root user that matches the host UID/GID ---
+ARG USERNAME=dougbtv
+ARG USER_UID=1014
+ARG USER_GID=1014
+
+# Create group+user (handle cases where base image already has group id)
+RUN set -eux; \
+    if ! getent group "${USER_GID}" >/dev/null; then groupadd -g "${USER_GID}" "${USERNAME}"; fi; \
+    if ! id -u "${USER_UID}" >/dev/null 2>&1; then useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USERNAME}"; fi; \
+    mkdir -p "${APP_DIR}" /home/${USERNAME}/.cache; \
+    chown -R "${USER_UID}:${USER_GID}" /workspace /home/${USERNAME}
+
+# Copy source and make it owned by the user (avoids root-owned workdir)
+COPY --chown=${USER_UID}:${USER_GID} . .
+
+# Install deps as root (fine) then switch to user for runtime
+RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir ".[dev]" && \
+    uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-core && \
+    uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-pipelines && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+
+# Set sensible cache defaults (can still be overridden at runtime)
+ENV HOME=/home/${USERNAME} \
+    HF_HOME=/home/${USERNAME}/.cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/home/${USERNAME}/.cache/huggingface/hub \
+    TRANSFORMERS_CACHE=/home/${USERNAME}/.cache/huggingface/hub
+
+# Default to non-root
+USER ${USER_UID}:${USER_GID}
+
+ENTRYPOINT []

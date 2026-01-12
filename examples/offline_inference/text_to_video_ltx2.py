@@ -199,11 +199,17 @@ def main():
 
     # Extract video frames from output
     print("Processing output...")
+    print(f"Output type: {type(frames)}")
+    print(f"Output length: {len(frames) if isinstance(frames, list) else 'N/A'}")
+
     if isinstance(frames, list) and len(frames) > 0:
         first_item = frames[0]
+        print(f"First item type: {type(first_item)}")
+        print(f"First item has .images: {hasattr(first_item, 'images')}")
 
         # Check if it's an OmniRequestOutput
         if hasattr(first_item, "final_output_type"):
+            print(f"Output type field: {first_item.final_output_type}")
             if first_item.final_output_type != "image":
                 print(
                     f"⚠️  Unexpected output type '{first_item.final_output_type}', "
@@ -212,18 +218,57 @@ def main():
 
             # Pipeline mode: extract from nested request_output
             if hasattr(first_item, "is_pipeline_output") and first_item.is_pipeline_output:
+                print("Pipeline output mode detected")
                 if isinstance(first_item.request_output, list) and len(first_item.request_output) > 0:
                     inner_output = first_item.request_output[0]
-                    if isinstance(inner_output, OmniRequestOutput) and hasattr(inner_output, "images"):
-                        frames = inner_output.images[0] if inner_output.images else None
-                        if frames is None:
-                            print("❌ No video frames found in output.")
+                    print(f"Inner output type: {type(inner_output)}")
+
+                    # Handle both OmniRequestOutput and SimpleNamespace
+                    if isinstance(inner_output, OmniRequestOutput):
+                        # Try to extract the actual tensor from images field
+                        if hasattr(inner_output, "images") and inner_output.images:
+                            frames = inner_output.images
+                            print(f"Extracted frames from inner.images: {type(frames)}")
+                            # If it's a single-element list, unwrap it
+                            if isinstance(frames, list) and len(frames) == 1:
+                                frames = frames[0]
+                                print(f"Unwrapped to: {type(frames)}")
+                        else:
+                            print("❌ No video frames found in inner output.")
+                            print(f"Available attributes: {[a for a in dir(inner_output) if not a.startswith('_')]}")
                             return
+                    else:
+                        # Handle SimpleNamespace or other types
+                        print("Inner output is not OmniRequestOutput, trying attribute extraction...")
+                        print(f"Available attributes: {[a for a in dir(inner_output) if not a.startswith('_')]}")
+
+                        # Try common attribute names
+                        if hasattr(inner_output, "output"):
+                            frames = inner_output.output
+                            print(f"Extracted frames from inner.output: {type(frames)}")
+                        elif hasattr(inner_output, "images"):
+                            frames = inner_output.images
+                            print(f"Extracted frames from inner.images: {type(frames)}")
+                        else:
+                            print("❌ Could not find video frames in inner output.")
+                            return
+
+                        # If it's a single-element list, unwrap it
+                        if isinstance(frames, list) and len(frames) == 1:
+                            frames = frames[0]
+                            print(f"Unwrapped to: {type(frames)}")
             # Diffusion mode: use direct images field
-            elif hasattr(first_item, "images") and first_item.images:
+            elif hasattr(first_item, "images") and first_item.images is not None:
+                print("Diffusion output mode detected")
+                print(f"first_item.images type: {type(first_item.images)}")
                 frames = first_item.images
+                # If it's a single-element list, unwrap it
+                if isinstance(frames, list) and len(frames) == 1:
+                    frames = frames[0]
+                    print(f"Unwrapped to: {type(frames)}")
             else:
                 print("❌ No video frames found in OmniRequestOutput.")
+                print(f"Available attributes: {[a for a in dir(first_item) if not a.startswith('_')]}")
                 return
 
     # Save video

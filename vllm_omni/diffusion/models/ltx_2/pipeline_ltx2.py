@@ -490,13 +490,33 @@ class LTX2Pipeline(nn.Module):
             sigmas=self.distilled_sigmas,
         )
 
+        # Clear conditioning before unpatchifying (matches upstream pattern)
+        video_state = self.video_tools.clear_conditioning(video_state)
+
         # Unpatchify the video state to get back to (B, C, T, H, W) format
         video_state = self.video_tools.unpatchify(video_state)
         denoised_video_latents = video_state.latent
 
+        # Debug: Check latent statistics
+        logger.info(
+            f"DEBUG: Denoised latents - shape={denoised_video_latents.shape}, "
+            f"min={denoised_video_latents.min().item():.4f}, "
+            f"max={denoised_video_latents.max().item():.4f}, "
+            f"mean={denoised_video_latents.mean().item():.4f}"
+        )
+
         # Step 5: Decode video
         logger.info("Step 5/5: Decoding video...")
         decoded_video = self.decode_video(denoised_video_latents)
+
+        # Debug: Check decoded video statistics
+        logger.info(
+            f"DEBUG: Decoded video - shape={decoded_video.shape}, "
+            f"dtype={decoded_video.dtype}, "
+            f"min={decoded_video.min().item()}, "
+            f"max={decoded_video.max().item()}, "
+            f"mean={decoded_video.float().mean().item():.4f}"
+        )
 
         # Store in request output field
         req.output = decoded_video
@@ -606,13 +626,11 @@ class LTX2Pipeline(nn.Module):
             scale_factors=scale_factors,
         )
 
-        # Create random video latents
-        video_latents = torch.randn(
-            video_latent_shape.to_torch_shape(),
-            generator=generator,
-            device=device,
-            dtype=dtype,
-        )
+        # For text-to-video, we don't pre-initialize latents
+        # VideoLatentTools.create_initial_state will create zeros
+        # which will then be noised by GaussianNoiser
+        # (This is different from img2vid where initial_latent would be encoded image)
+        video_latents = None
 
         # Create audio latent shape
         audio_latent_shape = AudioLatentShape.from_video_pixel_shape(video_pixel_shape)
@@ -623,12 +641,9 @@ class LTX2Pipeline(nn.Module):
             target_shape=audio_latent_shape,
         )
 
-        # Create dummy audio latents (not used in video-only generation)
-        audio_latents = torch.zeros(
-            audio_latent_shape.to_torch_shape(),
-            device=device,
-            dtype=dtype,
-        )
+        # For video-only mode, audio latents are unused placeholders
+        # create_initial_state will handle initialization
+        audio_latents = None
 
         logger.debug(
             f"Latents initialized: video={video_latent_shape}, "
@@ -776,10 +791,10 @@ class LTX2Pipeline(nn.Module):
         """Decode video latents to pixel space.
 
         Args:
-            video_latents: Latent tensor from denoising loop
+            video_latents: Latent tensor from denoising loop (B, C, T, H, W)
 
         Returns:
-            Decoded video tensor (B, C, T, H, W)
+            Decoded video tensor [f, h, w, c] uint8
         """
         # Load video decoder
         video_decoder = self.model_ledger.video_decoder()
@@ -794,18 +809,20 @@ class LTX2Pipeline(nn.Module):
                 video_decoder.use_tiling = getattr(self.od_config, "vae_use_tiling", False)
                 logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
 
-            # Decode latents to pixels (returns generator of chunks)
-            video_chunks = vae_decode_video(video_latents, video_decoder)
+            # vae_decode_video expects latents in [C, T, H, W] format (NO batch dim!)
+            # We have [B, C, T, H, W], so squeeze batch dimension
+            logger.debug(f"Decoding video latents with shape: {video_latents.shape}")
 
-            # Collect all chunks (typically just one chunk for non-tiled decoding)
-            frames_list = list(video_chunks)
+            # Remove batch dimension [B, C, T, H, W] → [C, T, H, W]
+            video_latents_no_batch = video_latents.squeeze(0)
 
-            # Concatenate chunks if multiple, otherwise use the single chunk
-            if len(frames_list) == 1:
-                decoded_video = frames_list[0]
-            else:
-                # Multiple chunks: concatenate along temporal dimension
-                decoded_video = torch.cat(frames_list, dim=0)
+            # vae_decode_video is a generator that yields decoded chunks
+            # For non-tiled decoding, it yields exactly once with uint8 frames [f, h, w, c]
+            # Internally it:
+            # 1. Calls video_decoder(latent) which applies per_channel_statistics.un_normalize()
+            # 2. Converts to uint8: (((x + 1) / 2).clamp(0, 1) * 255)
+            # 3. Rearranges to [f, h, w, c] format
+            decoded_video = next(vae_decode_video(video_latents_no_batch, video_decoder))
 
             logger.debug(f"Video decoded: shape={decoded_video.shape}")
 

@@ -102,7 +102,7 @@ ssh -t "${REMOTE}" bash -lc "set -euo pipefail
     python examples/offline_inference/text_to_video_ltx2.py \
       --model '${MODEL}' \
       --prompt \"${PROMPT}\" \
-      --height 512 --width 512 --num_frames 241 \
+      --height 512 --width 512 --num_frames 121 \
       --output '/output/${OUTPUT}'
 "
 

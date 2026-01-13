@@ -507,19 +507,24 @@ class LTX2Pipeline(nn.Module):
 
         # Step 5: Decode video
         logger.info("Step 5/5: Decoding video...")
-        decoded_video = self.decode_video(denoised_video_latents)
+        fps_value = req.fps if hasattr(req, 'fps') and req.fps else 24.0
+        decoded_video = self.decode_video(denoised_video_latents, fps=fps_value)
 
-        # Debug: Check decoded video statistics
-        logger.info(
-            f"DEBUG: Decoded video - shape={decoded_video.shape}, "
-            f"dtype={decoded_video.dtype}, "
-            f"min={decoded_video.min().item()}, "
-            f"max={decoded_video.max().item()}, "
-            f"mean={decoded_video.float().mean().item():.4f}"
-        )
-
-        # Store in request output field
-        req.output = decoded_video
+        # Handle both tensor (small videos) and file path (large videos) returns
+        if isinstance(decoded_video, str):
+            # Large video - written to disk
+            logger.info(f"✓ Large video saved to: {decoded_video}")
+            req.output = decoded_video
+        else:
+            # Small video - tensor in memory
+            logger.info(
+                f"DEBUG: Decoded video - shape={decoded_video.shape}, "
+                f"dtype={decoded_video.dtype}, "
+                f"min={decoded_video.min().item()}, "
+                f"max={decoded_video.max().item()}, "
+                f"mean={decoded_video.float().mean().item():.4f}"
+            )
+            req.output = decoded_video
 
         logger.info("✓ Generation complete!")
 
@@ -787,19 +792,32 @@ class LTX2Pipeline(nn.Module):
     def decode_video(
         self,
         video_latents: torch.Tensor,
+        fps: float = 24.0,
     ):
         """Decode video latents to pixel space.
 
         Args:
             video_latents: Latent tensor from denoising loop (B, C, T, H, W)
+            fps: Frames per second (for video file if writing to disk)
 
         Returns:
-            Decoded video tensor [f, h, w, c] uint8
+            For small videos (<100 frames): Decoded video tensor [f, h, w, c] uint8
+            For large videos (>=100 frames): File path (str) to saved MP4
         """
         # Load video decoder
         video_decoder = self.model_ledger.video_decoder()
 
         try:
+            # Determine if we should use tiling and write to disk
+            # Large videos (>= 100 frames) can't fit through multiprocessing queue
+            B, C, T, H, W = video_latents.shape
+            num_frames_decoded = (T - 1) * 8 + 1  # Temporal upsampling: 8x
+            use_disk_streaming = num_frames_decoded >= 100
+
+            logger.info(f"Decoding {num_frames_decoded} frames (latent T={T})")
+            if use_disk_streaming:
+                logger.info("  → Using disk streaming (large video)")
+
             # Configure VAE memory optimization settings if available
             # These help reduce VRAM usage for large videos
             if hasattr(video_decoder, "use_slicing"):
@@ -872,58 +890,111 @@ class LTX2Pipeline(nn.Module):
             logger.info("=" * 60)
 
             # vae_decode_video expects latents in [B, C, T, H, W] format
-            # (despite docstring saying [c, f, h, w], code does frames[0] to remove batch dim)
             logger.debug(f"Decoding latents with shape: {video_latents.shape}")
 
-            # vae_decode_video is a generator that yields decoded chunks
-            # For non-tiled decoding, it yields exactly once with uint8 frames [f, h, w, c]
-            # Internally it:
-            # 1. Calls video_decoder(latent) with [B, C, T, H, W]
-            # 2. video_decoder applies per_channel_statistics.un_normalize()
-            # 3. Converts to uint8: (((x + 1) / 2).clamp(0, 1) * 255)
-            # 4. Removes batch dim and rearranges: frames[0], "c f h w -> f h w c"
-            decoded_video = next(vae_decode_video(video_latents, video_decoder))
+            if use_disk_streaming:
+                # === LARGE VIDEO PATH: Stream to disk ===
+                from ltx_core.model.video_vae.tiling import TilingConfig
+                import av
 
-            # === DEBUG CHECKPOINT: Save first frame as PNG ===
-            logger.info("=" * 60)
-            logger.info("DEBUG CHECKPOINT: Decoded video analysis")
-            logger.info(f"  Shape: {decoded_video.shape}")
-            logger.info(f"  Dtype: {decoded_video.dtype}")
+                # Use tiling for large videos to avoid OOM
+                tiling_config = TilingConfig.default()
+                logger.info(f"  Using tiling: temporal={tiling_config.temporal_config.tile_size_in_frames} frames/chunk")
 
-            # Handle both torch tensors and numpy arrays
-            if isinstance(decoded_video, torch.Tensor):
-                logger.info(f"  Min: {decoded_video.min().item()}")
-                logger.info(f"  Max: {decoded_video.max().item()}")
-                unique_count = len(torch.unique(decoded_video[0, :, :, 0]))
-                frame0_np = decoded_video[0].cpu().numpy()
+                # Write directly to output file
+                output_path = "/output/ltx2_large_video.mp4"
+                height_decoded = H * 32  # Spatial upsampling: 32x
+                width_decoded = W * 32
+
+                logger.info(f"  Writing to: {output_path}")
+                logger.info(f"  Decoded size: {width_decoded}x{height_decoded}, {num_frames_decoded} frames @ {fps} fps")
+
+                container = av.open(output_path, mode="w")
+                stream = container.add_stream("libx264", rate=int(fps))
+                stream.width = width_decoded
+                stream.height = height_decoded
+                stream.pix_fmt = "yuv420p"
+
+                # Decode and write chunks
+                frame_count = 0
+                first_frame_saved = False
+                for video_chunk in vae_decode_video(video_latents, video_decoder, tiling_config):
+                    # video_chunk is [f, h, w, c] uint8
+                    chunk_np = video_chunk.cpu().numpy() if isinstance(video_chunk, torch.Tensor) else video_chunk
+
+                    # Save first frame for debugging
+                    if not first_frame_saved:
+                        try:
+                            from PIL import Image
+                            Image.fromarray(chunk_np[0]).save("/output/ltx2_debug_frame0.png")
+                            logger.info(f"  Saved first frame: /output/ltx2_debug_frame0.png")
+                            first_frame_saved = True
+                        except Exception as e:
+                            logger.warning(f"  Failed to save debug frame: {e}")
+
+                    # Write frames
+                    for frame_array in chunk_np:
+                        frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
+                        for packet in stream.encode(frame):
+                            container.mux(packet)
+                        frame_count += 1
+
+                # Flush encoder
+                for packet in stream.encode():
+                    container.mux(packet)
+                container.close()
+
+                logger.info(f"  ✓ Wrote {frame_count} frames to {output_path}")
+
+                # Return file path instead of tensor
+                return output_path
+
             else:
-                import numpy as np
-                logger.info(f"  Min: {decoded_video.min()}")
-                logger.info(f"  Max: {decoded_video.max()}")
-                unique_count = len(np.unique(decoded_video[0, :, :, 0]))
-                frame0_np = decoded_video[0]
+                # === SMALL VIDEO PATH: Return tensor (original behavior) ===
+                # vae_decode_video is a generator that yields decoded chunks
+                # For non-tiled decoding, it yields exactly once with uint8 frames [f, h, w, c]
+                decoded_video = next(vae_decode_video(video_latents, video_decoder))
 
-            logger.info(f"  Unique values in first channel: {unique_count}")
+                # === DEBUG CHECKPOINT: Save first frame as PNG ===
+                logger.info("=" * 60)
+                logger.info("DEBUG CHECKPOINT: Decoded video analysis")
+                logger.info(f"  Shape: {decoded_video.shape}")
+                logger.info(f"  Dtype: {decoded_video.dtype}")
 
-            # Save first frame as PNG for visual inspection
-            try:
-                from PIL import Image
-                import numpy as np
+                # Handle both torch tensors and numpy arrays
+                if isinstance(decoded_video, torch.Tensor):
+                    logger.info(f"  Min: {decoded_video.min().item()}")
+                    logger.info(f"  Max: {decoded_video.max().item()}")
+                    unique_count = len(torch.unique(decoded_video[0, :, :, 0]))
+                    frame0_np = decoded_video[0].cpu().numpy()
+                else:
+                    import numpy as np
+                    logger.info(f"  Min: {decoded_video.min()}")
+                    logger.info(f"  Max: {decoded_video.max()}")
+                    unique_count = len(np.unique(decoded_video[0, :, :, 0]))
+                    frame0_np = decoded_video[0]
 
-                # Ensure uint8
-                if frame0_np.dtype != np.uint8:
-                    frame0_np = np.clip(frame0_np, 0, 255).astype(np.uint8)
+                logger.info(f"  Unique values in first channel: {unique_count}")
 
-                Image.fromarray(frame0_np).save("/output/ltx2_debug_frame0.png")
-                logger.info("  Saved: /output/ltx2_debug_frame0.png")
-            except Exception as e:
-                logger.error(f"  Failed to save PNG: {e}")
+                # Save first frame as PNG for visual inspection
+                try:
+                    from PIL import Image
+                    import numpy as np
 
-            logger.info("=" * 60)
+                    # Ensure uint8
+                    if frame0_np.dtype != np.uint8:
+                        frame0_np = np.clip(frame0_np, 0, 255).astype(np.uint8)
 
-            logger.debug(f"Video decoded: shape={decoded_video.shape}")
+                    Image.fromarray(frame0_np).save("/output/ltx2_debug_frame0.png")
+                    logger.info("  Saved: /output/ltx2_debug_frame0.png")
+                except Exception as e:
+                    logger.error(f"  Failed to save PNG: {e}")
 
-            return decoded_video
+                logger.info("=" * 60)
+
+                logger.debug(f"Video decoded: shape={decoded_video.shape}")
+
+                return decoded_video
 
         finally:
             # Clean up decoder

@@ -258,12 +258,6 @@ def main():
                             frames = frames[0]
                             print(f"Unwrapped to: {type(frames)}")
 
-                        # Check if large video was written to disk
-                        if isinstance(frames, str):
-                            print(f"\n✓ Large video already saved to: {frames}")
-                            print("Skipping PyAV encoding (file already exists)")
-                            return
-
             # Diffusion mode: use direct images field
             elif hasattr(first_item, "images") and first_item.images is not None:
                 print("Diffusion output mode detected")
@@ -277,6 +271,15 @@ def main():
                 print("❌ No video frames found in OmniRequestOutput.")
                 print(f"Available attributes: {[a for a in dir(first_item) if not a.startswith('_')]}")
                 return
+
+    # Check if large video was written to disk (file path returned instead of tensor)
+    if isinstance(frames, str):
+        print(f"\n✓ Large video already saved to: {frames}")
+        print("  (Skipping PyAV encoding - file already exists)")
+        print("\n" + "=" * 70)
+        print("Generation complete!")
+        print("=" * 70)
+        return
 
     # Save video
     output_path = Path(args.output)

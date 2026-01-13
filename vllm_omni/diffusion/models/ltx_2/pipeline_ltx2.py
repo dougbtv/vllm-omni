@@ -82,24 +82,30 @@ def get_ltx2_post_process_func(od_config: OmniDiffusionConfig):
     video_processor = VideoProcessor(vae_scale_factor=32)
 
     def post_process_func(
-        video: torch.Tensor,
+        video: torch.Tensor | str,
         output_type: str = "np",
     ):
         """Post-process video frames.
 
         Args:
-            video: Decoded video tensor
-                - From vae_decode_video: [f, h, w, c] uint8 (already converted)
-                - From latent decode: [B, C, T, H, W] float (needs conversion)
+            video: Decoded video tensor or file path (str)
+                - Tensor: [f, h, w, c] uint8 (from vae_decode_video)
+                - Tensor: [B, C, T, H, W] float (needs conversion)
+                - str: File path to already-saved video (large videos)
             output_type: "np" for numpy array, "latent" for raw tensor
 
         Returns:
-            Processed video frames (numpy array or list of PIL images)
+            Processed video frames (numpy array or list of PIL images) or file path (str)
 
         Note:
             LTX-2's vae_decode_video returns uint8 tensors in [f, h, w, c] format,
             already converted to [0, 255] range. No further processing needed.
+            For large videos, returns file path as-is.
         """
+        # Handle file path (large videos written to disk)
+        if isinstance(video, str):
+            return video  # Return file path as-is
+
         if output_type == "latent":
             return video
 

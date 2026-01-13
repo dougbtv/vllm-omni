@@ -257,6 +257,13 @@ def main():
                         if isinstance(frames, list) and len(frames) == 1:
                             frames = frames[0]
                             print(f"Unwrapped to: {type(frames)}")
+
+                        # Check if large video was written to disk
+                        if isinstance(frames, str):
+                            print(f"\n✓ Large video already saved to: {frames}")
+                            print("Skipping PyAV encoding (file already exists)")
+                            return
+
             # Diffusion mode: use direct images field
             elif hasattr(first_item, "images") and first_item.images is not None:
                 print("Diffusion output mode detected")

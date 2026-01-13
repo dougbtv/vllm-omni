@@ -842,6 +842,12 @@ class LTX2Pipeline(nn.Module):
             logger.info(f"  Post-norm Max:  {normalized_latents.max().item():.6f}")
             logger.info(f"  Post-norm Mean: {normalized_latents.mean().item():.6f}")
             logger.info(f"  Post-norm Std:  {normalized_latents.std().item():.6f}")
+
+            # === FIX 3: Convert back to bfloat16 to match decoder weights ===
+            # The VAE decoder weights are in bfloat16, so we need to convert the latents
+            # back to bfloat16 to avoid dtype mismatch errors
+            normalized_latents = normalized_latents.to(torch.bfloat16)
+            logger.info(f"  Final dtype for decode: {normalized_latents.dtype}")
             logger.info("=" * 60)
 
             # vae_decode_video expects latents in [B, C, T, H, W] format

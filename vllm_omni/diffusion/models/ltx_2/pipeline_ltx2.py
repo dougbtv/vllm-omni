@@ -810,13 +810,15 @@ class LTX2Pipeline(nn.Module):
                 logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
 
             # === VERIFY: Check that VAE weights are actually loaded ===
-            # The "load_weights stub" warning is suspicious - verify weights aren't default-init
+            logger.info("=" * 60)
+            logger.info("VAE DECODER WEIGHT VERIFICATION")
+
             weight_sample = None
             for name, param in video_decoder.named_parameters():
                 if param.ndim >= 2:  # Find a real weight tensor (not bias/scale)
                     weight_sample = param
-                    logger.debug(
-                        f"VAE weight sample: {name} "
+                    logger.info(
+                        f"  Sample weight: {name} "
                         f"shape={tuple(param.shape)} "
                         f"mean={param.float().mean().item():.6f} "
                         f"std={param.float().std().item():.6f}"
@@ -824,12 +826,18 @@ class LTX2Pipeline(nn.Module):
                     break
 
             if weight_sample is None:
-                logger.warning("Could not find any VAE decoder weights to verify!")
+                logger.error("❌ Could not find any VAE decoder weights!")
+                logger.error("   VAE decoder may not be properly initialized!")
             elif weight_sample.std().item() < 0.001:
-                logger.warning(
-                    f"VAE decoder weights look uninitialized! "
+                logger.error(
+                    f"❌ VAE decoder weights look UNINITIALIZED! "
                     f"std={weight_sample.std().item():.6f} (expected > 0.01)"
                 )
+                logger.error("   This will produce garbage output!")
+            else:
+                logger.info(f"✓ VAE weights appear properly loaded (std={weight_sample.std().item():.4f})")
+
+            logger.info("=" * 60)
 
             # === DIAGNOSTIC: Latent Analysis Before VAE Decode ===
             logger.info("=" * 60)

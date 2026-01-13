@@ -863,6 +863,43 @@ class LTX2Pipeline(nn.Module):
             # 4. Removes batch dim and rearranges: frames[0], "c f h w -> f h w c"
             decoded_video = next(vae_decode_video(normalized_latents, video_decoder))
 
+            # === DEBUG CHECKPOINT: Save first frame as PNG ===
+            logger.info("=" * 60)
+            logger.info("DEBUG CHECKPOINT: Decoded video analysis")
+            logger.info(f"  Shape: {decoded_video.shape}")
+            logger.info(f"  Dtype: {decoded_video.dtype}")
+
+            # Handle both torch tensors and numpy arrays
+            if isinstance(decoded_video, torch.Tensor):
+                logger.info(f"  Min: {decoded_video.min().item()}")
+                logger.info(f"  Max: {decoded_video.max().item()}")
+                unique_count = len(torch.unique(decoded_video[0, :, :, 0]))
+                frame0_np = decoded_video[0].cpu().numpy()
+            else:
+                import numpy as np
+                logger.info(f"  Min: {decoded_video.min()}")
+                logger.info(f"  Max: {decoded_video.max()}")
+                unique_count = len(np.unique(decoded_video[0, :, :, 0]))
+                frame0_np = decoded_video[0]
+
+            logger.info(f"  Unique values in first channel: {unique_count}")
+
+            # Save first frame as PNG for visual inspection
+            try:
+                from PIL import Image
+                import numpy as np
+
+                # Ensure uint8
+                if frame0_np.dtype != np.uint8:
+                    frame0_np = np.clip(frame0_np, 0, 255).astype(np.uint8)
+
+                Image.fromarray(frame0_np).save("/output/ltx2_debug_frame0.png")
+                logger.info("  Saved: /output/ltx2_debug_frame0.png")
+            except Exception as e:
+                logger.error(f"  Failed to save PNG: {e}")
+
+            logger.info("=" * 60)
+
             logger.debug(f"Video decoded: shape={decoded_video.shape}")
 
             return decoded_video

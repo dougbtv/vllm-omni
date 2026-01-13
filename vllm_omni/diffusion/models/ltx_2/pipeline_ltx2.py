@@ -809,6 +809,28 @@ class LTX2Pipeline(nn.Module):
                 video_decoder.use_tiling = getattr(self.od_config, "vae_use_tiling", False)
                 logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
 
+            # === VERIFY: Check that VAE weights are actually loaded ===
+            # The "load_weights stub" warning is suspicious - verify weights aren't default-init
+            weight_sample = None
+            for name, param in video_decoder.named_parameters():
+                if param.ndim >= 2:  # Find a real weight tensor (not bias/scale)
+                    weight_sample = param
+                    logger.debug(
+                        f"VAE weight sample: {name} "
+                        f"shape={tuple(param.shape)} "
+                        f"mean={param.float().mean().item():.6f} "
+                        f"std={param.float().std().item():.6f}"
+                    )
+                    break
+
+            if weight_sample is None:
+                logger.warning("Could not find any VAE decoder weights to verify!")
+            elif weight_sample.std().item() < 0.001:
+                logger.warning(
+                    f"VAE decoder weights look uninitialized! "
+                    f"std={weight_sample.std().item():.6f} (expected > 0.01)"
+                )
+
             # === FIX 1: Convert to float32 for precision ===
             # Using float32 prevents color banding from bfloat16 precision loss
             video_latents = video_latents.to(torch.float32)

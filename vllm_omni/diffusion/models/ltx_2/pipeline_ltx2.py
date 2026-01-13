@@ -831,11 +831,7 @@ class LTX2Pipeline(nn.Module):
                     f"std={weight_sample.std().item():.6f} (expected > 0.01)"
                 )
 
-            # === FIX 1: Convert to float32 for precision ===
-            # Using float32 prevents color banding from bfloat16 precision loss
-            video_latents = video_latents.to(torch.float32)
-
-            # === DIAGNOSTIC: Latent Analysis Before Normalization ===
+            # === DIAGNOSTIC: Latent Analysis Before VAE Decode ===
             logger.info("=" * 60)
             logger.info("DIAGNOSTIC: Latent Analysis Before VAE Decode")
             logger.info(f"  Pre-norm Shape: {video_latents.shape}")
@@ -860,6 +856,10 @@ class LTX2Pipeline(nn.Module):
             # causing massive clipping in VAE decoder and posterization.
             # The latents from diffusion are already in the space the VAE expects.
             logger.info(f"  Keeping latents as-is (already in correct space for VAE)")
+
+            # === FIX 3: Convert to decoder's dtype (bfloat16) ===
+            # VAE decoder has bfloat16 weights, so input must match to avoid dtype mismatch
+            video_latents = video_latents.to(torch.bfloat16)
             logger.info(f"  Final dtype for decode: {video_latents.dtype}")
             logger.info("=" * 60)
 

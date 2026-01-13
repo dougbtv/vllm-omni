@@ -832,27 +832,18 @@ class LTX2Pipeline(nn.Module):
                 logger.info(f"    mean-of-means: [{mean_of_means.min().item():.4f}, {mean_of_means.max().item():.4f}]")
                 logger.info(f"    std-of-means:  [{std_of_means.min().item():.4f}, {std_of_means.max().item():.4f}]")
 
-            # === FIX 2: Normalize latents to match VAE encoder's output space ===
-            # The diffusion process outputs approximately normalized latents, but they
-            # may not have the exact per-channel statistics that the VAE encoder produced.
-            # Re-normalize to ensure they match what the VAE decoder expects.
-            normalized_latents = video_decoder.per_channel_statistics.normalize(video_latents)
-
-            logger.info(f"  Post-norm Min:  {normalized_latents.min().item():.6f}")
-            logger.info(f"  Post-norm Max:  {normalized_latents.max().item():.6f}")
-            logger.info(f"  Post-norm Mean: {normalized_latents.mean().item():.6f}")
-            logger.info(f"  Post-norm Std:  {normalized_latents.std().item():.6f}")
-
-            # === FIX 3: Convert back to bfloat16 to match decoder weights ===
-            # The VAE decoder weights are in bfloat16, so we need to convert the latents
-            # back to bfloat16 to avoid dtype mismatch errors
-            normalized_latents = normalized_latents.to(torch.bfloat16)
-            logger.info(f"  Final dtype for decode: {normalized_latents.dtype}")
+            # === FIX 2: Do NOT normalize - latents are already in correct space ===
+            # Diagnostics showed pre-norm latents are already centered ~0 with wide range [-7,7].
+            # The per_channel_statistics.normalize() call EXPLODES the range to [-59,67],
+            # causing massive clipping in VAE decoder and posterization.
+            # The latents from diffusion are already in the space the VAE expects.
+            logger.info(f"  Keeping latents as-is (already in correct space for VAE)")
+            logger.info(f"  Final dtype for decode: {video_latents.dtype}")
             logger.info("=" * 60)
 
             # vae_decode_video expects latents in [B, C, T, H, W] format
             # (despite docstring saying [c, f, h, w], code does frames[0] to remove batch dim)
-            logger.debug(f"Decoding normalized latents with shape: {normalized_latents.shape}")
+            logger.debug(f"Decoding latents with shape: {video_latents.shape}")
 
             # vae_decode_video is a generator that yields decoded chunks
             # For non-tiled decoding, it yields exactly once with uint8 frames [f, h, w, c]
@@ -861,7 +852,7 @@ class LTX2Pipeline(nn.Module):
             # 2. video_decoder applies per_channel_statistics.un_normalize()
             # 3. Converts to uint8: (((x + 1) / 2).clamp(0, 1) * 255)
             # 4. Removes batch dim and rearranges: frames[0], "c f h w -> f h w c"
-            decoded_video = next(vae_decode_video(normalized_latents, video_decoder))
+            decoded_video = next(vae_decode_video(video_latents, video_decoder))
 
             # === DEBUG CHECKPOINT: Save first frame as PNG ===
             logger.info("=" * 60)

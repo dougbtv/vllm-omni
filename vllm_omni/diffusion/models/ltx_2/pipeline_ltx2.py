@@ -809,20 +809,53 @@ class LTX2Pipeline(nn.Module):
                 video_decoder.use_tiling = getattr(self.od_config, "vae_use_tiling", False)
                 logger.debug(f"VAE tiling enabled: {video_decoder.use_tiling}")
 
-            # vae_decode_video expects latents in [C, T, H, W] format (NO batch dim!)
-            # We have [B, C, T, H, W], so squeeze batch dimension
-            logger.debug(f"Decoding video latents with shape: {video_latents.shape}")
+            # === FIX 1: Convert to float32 for precision ===
+            # Using float32 prevents color banding from bfloat16 precision loss
+            video_latents = video_latents.to(torch.float32)
 
-            # Remove batch dimension [B, C, T, H, W] → [C, T, H, W]
-            video_latents_no_batch = video_latents.squeeze(0)
+            # === DIAGNOSTIC: Latent Analysis Before Normalization ===
+            logger.info("=" * 60)
+            logger.info("DIAGNOSTIC: Latent Analysis Before VAE Decode")
+            logger.info(f"  Pre-norm Shape: {video_latents.shape}")
+            logger.info(f"  Pre-norm Dtype: {video_latents.dtype}")
+            logger.info(f"  Pre-norm Min:   {video_latents.min().item():.6f}")
+            logger.info(f"  Pre-norm Max:   {video_latents.max().item():.6f}")
+            logger.info(f"  Pre-norm Mean:  {video_latents.mean().item():.6f}")
+            logger.info(f"  Pre-norm Std:   {video_latents.std().item():.6f}")
+
+            # Check per_channel_statistics status
+            stats = video_decoder.per_channel_statistics
+            mean_of_means = stats.get_buffer('mean-of-means')
+            std_of_means = stats.get_buffer('std-of-means')
+            logger.info(f"  Per-channel stats loaded: {mean_of_means.numel() > 0}")
+            if mean_of_means.numel() > 0:
+                logger.info(f"    mean-of-means: [{mean_of_means.min().item():.4f}, {mean_of_means.max().item():.4f}]")
+                logger.info(f"    std-of-means:  [{std_of_means.min().item():.4f}, {std_of_means.max().item():.4f}]")
+
+            # === FIX 2: Normalize latents to match VAE encoder's output space ===
+            # The diffusion process outputs approximately normalized latents, but they
+            # may not have the exact per-channel statistics that the VAE encoder produced.
+            # Re-normalize to ensure they match what the VAE decoder expects.
+            normalized_latents = video_decoder.per_channel_statistics.normalize(video_latents)
+
+            logger.info(f"  Post-norm Min:  {normalized_latents.min().item():.6f}")
+            logger.info(f"  Post-norm Max:  {normalized_latents.max().item():.6f}")
+            logger.info(f"  Post-norm Mean: {normalized_latents.mean().item():.6f}")
+            logger.info(f"  Post-norm Std:  {normalized_latents.std().item():.6f}")
+            logger.info("=" * 60)
+
+            # vae_decode_video expects latents in [B, C, T, H, W] format
+            # (despite docstring saying [c, f, h, w], code does frames[0] to remove batch dim)
+            logger.debug(f"Decoding normalized latents with shape: {normalized_latents.shape}")
 
             # vae_decode_video is a generator that yields decoded chunks
             # For non-tiled decoding, it yields exactly once with uint8 frames [f, h, w, c]
             # Internally it:
-            # 1. Calls video_decoder(latent) which applies per_channel_statistics.un_normalize()
-            # 2. Converts to uint8: (((x + 1) / 2).clamp(0, 1) * 255)
-            # 3. Rearranges to [f, h, w, c] format
-            decoded_video = next(vae_decode_video(video_latents_no_batch, video_decoder))
+            # 1. Calls video_decoder(latent) with [B, C, T, H, W]
+            # 2. video_decoder applies per_channel_statistics.un_normalize()
+            # 3. Converts to uint8: (((x + 1) / 2).clamp(0, 1) * 255)
+            # 4. Removes batch dim and rearranges: frames[0], "c f h w -> f h w c"
+            decoded_video = next(vae_decode_video(normalized_latents, video_decoder))
 
             logger.debug(f"Video decoded: shape={decoded_video.shape}")
 

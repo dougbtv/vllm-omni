@@ -1,3 +1,31 @@
+# ==============================================================================
+# LTX-2 Video Generation Container
+# ==============================================================================
+# Production-ready Dockerfile for vllm-omni with LTX-2 support.
+#
+# Key Features:
+# - Works with podman's --userns=keep-id (auto-maps host user)
+# - No hardcoded usernames or UIDs
+# - Writable workspace for any user
+# - Cache directories in /tmp (no permission issues)
+#
+# Build:
+#   podman build -t vllm-omni:ltx2 -f docker/Dockerfile.ltx2 .
+#
+# Run with podman (recommended):
+#   podman run --rm --device nvidia.com/gpu=0 \
+#     --userns=keep-id \
+#     -v /path/to/hf/cache:/hf/hub \
+#     -v /path/to/output:/output \
+#     -e HF_TOKEN=hf_... \
+#     -e HUGGINGFACE_HUB_CACHE=/hf/hub \
+#     vllm-omni:ltx2 \
+#     python examples/offline_inference/text_to_video_ltx2.py \
+#       --model Lightricks/LTX-2 \
+#       --prompt "A cat playing with a ball" \
+#       --output /output/video.mp4
+# ==============================================================================
+
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai
 ARG VLLM_BASE_TAG=v0.12.0
 FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG}
@@ -5,34 +33,22 @@ FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG}
 ARG APP_DIR=/workspace/vllm-omni
 WORKDIR ${APP_DIR}
 
-# --- Create a non-root user that matches the host UID/GID ---
-ARG USERNAME=dougbtv
-ARG USER_UID=1014
-ARG USER_GID=1014
+# Copy source code
+COPY . .
 
-# Create group+user (handle cases where base image already has group id)
-RUN set -eux; \
-    if ! getent group "${USER_GID}" >/dev/null; then groupadd -g "${USER_GID}" "${USERNAME}"; fi; \
-    if ! id -u "${USER_UID}" >/dev/null 2>&1; then useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USERNAME}"; fi; \
-    mkdir -p "${APP_DIR}" /home/${USERNAME}/.cache; \
-    chown -R "${USER_UID}:${USER_GID}" /workspace /home/${USERNAME}
-
-# Copy source and make it owned by the user (avoids root-owned workdir)
-COPY --chown=${USER_UID}:${USER_GID} . .
-
-# Install deps as root (fine) then switch to user for runtime
+# Install vllm-omni and LTX-2 dependencies
 RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir ".[dev]" && \
     uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-core && \
     uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-pipelines && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
-# Set sensible cache defaults (can still be overridden at runtime)
-ENV HOME=/home/${USERNAME} \
-    HF_HOME=/home/${USERNAME}/.cache/huggingface \
-    HUGGINGFACE_HUB_CACHE=/home/${USERNAME}/.cache/huggingface/hub \
-    TRANSFORMERS_CACHE=/home/${USERNAME}/.cache/huggingface/hub
+# Make workspace writable by any user (for podman --userns=keep-id)
+RUN chmod -R 777 ${APP_DIR}
 
-# Default to non-root
-USER ${USER_UID}:${USER_GID}
+# Set cache directory defaults (can be overridden at runtime)
+# These work with podman's --userns=keep-id which auto-maps host user
+ENV HF_HOME=/tmp/hf \
+    HUGGINGFACE_HUB_CACHE=/tmp/hf/hub \
+    TRANSFORMERS_CACHE=/tmp/hf/hub
 
 ENTRYPOINT []

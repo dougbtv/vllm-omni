@@ -25,19 +25,33 @@ EOF
 }
 
 REV=""
-REMOTE="dougbtv@a100-07"
-GPU="0"
-PROMPT="A cat playing with a ball"
-OUTPUT="test_output.mp4"
 SKIP_BUILD=false
 
-# You can tweak these defaults if needed
-IMAGE_REPO="quay.io/dosmith/vllm-omni"
-DOCKERFILE="docker/Dockerfile.ltx2"
+# ============================================================================
+# DEFAULTS - Customize these for your environment
+# ============================================================================
+# Remote host for testing (can override with --remote)
+REMOTE="${REMOTE:-dougbtv@a100-07}"
+
+# GPU device to use (can override with --gpu)
+GPU="${GPU:-0}"
+
+# Generation parameters (can override with --prompt/--output)
+PROMPT="${PROMPT:-A cat playing with a ball}"
+OUTPUT="${OUTPUT:-test_output.mp4}"
+
+# Container image settings (customize for your registry)
+IMAGE_REPO="${IMAGE_REPO:-quay.io/dosmith/vllm-omni}"
+DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.ltx2}"
 CONTAINER_WORKDIR="/workspace/vllm-omni"
-REMOTE_HF_CACHE="/mnt/nvme-data/engine/dougbtv/hub_cache"
-REMOTE_OUTPUT_DIR="/home/dougbtv/mp4s"
-MODEL="Lightricks/LTX-2"
+
+# Remote paths (customize for your setup)
+REMOTE_HF_CACHE="${REMOTE_HF_CACHE:-/mnt/nvme-data/engine/dougbtv/hub_cache}"
+REMOTE_OUTPUT_DIR="${REMOTE_OUTPUT_DIR:-/home/dougbtv/mp4s}"
+
+# Model to use
+MODEL="${MODEL:-Lightricks/LTX-2}"
+# ============================================================================
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,7 +116,7 @@ ssh -t "${REMOTE}" bash -lc "set -euo pipefail
     python examples/offline_inference/text_to_video_ltx2.py \
       --model '${MODEL}' \
       --prompt \"${PROMPT}\" \
-      --height 512 --width 512 --num_frames 121 \
+      --height 1024 --width 1024 --num_frames 121 \
       --output '/output/${OUTPUT}'
 "
 

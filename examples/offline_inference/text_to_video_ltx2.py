@@ -275,11 +275,12 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Import PyAV for Chrome-compatible video encoding
     try:
-        from diffusers.utils import export_to_video
+        import av
     except ImportError:
-        print("❌ diffusers is required for export_to_video.")
-        print("Install with: pip install diffusers")
+        print("❌ PyAV is required for video export.")
+        print("Install with: pip install av")
         return
 
     # Process frames tensor
@@ -309,12 +310,47 @@ def main():
         if hasattr(video_array, "shape") and video_array.ndim == 5:
             video_array = video_array[0]
 
-    # Convert to list of frames for export_to_video
-    if isinstance(video_array, np.ndarray) and video_array.ndim == 4:
-        video_array = list(video_array)
+    # Ensure video_array is numpy array in [F, H, W, C] format
+    if isinstance(video_array, list):
+        video_array = np.array(video_array)
 
-    # Export video
-    export_to_video(video_array, str(output_path), fps=args.fps)
+    if video_array.ndim != 4:
+        print(f"❌ Unexpected video array shape: {video_array.shape}")
+        return
+
+    num_frames, height, width, channels = video_array.shape
+
+    # Ensure uint8 format
+    if video_array.dtype != np.uint8:
+        video_array = np.clip(video_array * 255, 0, 255).astype(np.uint8)
+
+    # Export video using PyAV with Chrome-compatible settings
+    print(f"\nExporting video: {num_frames} frames at {width}x{height} @ {args.fps} fps")
+
+    container = av.open(str(output_path), mode="w")
+    try:
+        # Create video stream with yuv420p for Chrome compatibility
+        stream = container.add_stream("libx264", rate=int(args.fps))
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"  # Critical for Chrome playback
+
+        # Encode frames
+        for i in range(num_frames):
+            frame_array = video_array[i]
+            # Create AV frame from numpy array (RGB format)
+            frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
+
+            # Encode and mux
+            for packet in stream.encode(frame):
+                container.mux(packet)
+
+        # Flush encoder
+        for packet in stream.encode():
+            container.mux(packet)
+    finally:
+        container.close()
+
     print(f"\n✓ Video saved to: {output_path}")
 
     print("\n" + "=" * 70)

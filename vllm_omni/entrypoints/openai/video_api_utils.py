@@ -7,6 +7,7 @@ Shared helper utilities for OpenAI-compatible video generation API.
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import tempfile
 from io import BytesIO
@@ -137,7 +138,19 @@ def _coerce_video_to_frames(video: Any) -> list[np.ndarray]:
 
 
 def encode_video_base64(video: Any, fps: int) -> str:
-    """Encode a video (frames/array/tensor) to base64 MP4."""
+    """Encode a video (frames/array/tensor/file_path) to base64 MP4."""
+
+    # Handle file path (LTX2 large videos already written to disk)
+    if isinstance(video, str):
+        if not os.path.isfile(video):
+            raise ValueError(f"Video file path does not exist: {video}")
+
+        logger = logging.getLogger(__name__)
+        logger.info(f"Reading pre-encoded video file: {video}")
+        with open(video, "rb") as f:
+            video_bytes = f.read()
+        return base64.b64encode(video_bytes).decode("utf-8")
+
     try:
         from diffusers.utils import export_to_video
     except ImportError as exc:  # pragma: no cover - optional dependency

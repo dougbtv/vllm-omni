@@ -77,6 +77,9 @@ class OmniOpenAIServingVideo:
                 model_name,
             )
 
+        # Detect if LTX2
+        is_ltx2 = self._is_ltx2_model()
+
         prompt: OmniTextPrompt = {"prompt": request.prompt}
         if request.negative_prompt is not None:
             prompt["negative_prompt"] = request.negative_prompt
@@ -94,7 +97,8 @@ class OmniOpenAIServingVideo:
 
         gen_params = OmniDiffusionSamplingParams(num_outputs_per_prompt=request.n)
 
-        width, height, num_frames, fps = self._resolve_video_params(request)
+        # Resolve params with LTX2 awareness
+        width, height, num_frames, fps = self._resolve_video_params(request, is_ltx2=is_ltx2)
         if width is not None and height is not None:
             gen_params.width = width
             gen_params.height = height
@@ -103,8 +107,13 @@ class OmniOpenAIServingVideo:
         if fps is not None:
             gen_params.fps = fps
 
-        if request.num_inference_steps is not None:
+        # LTX2-specific: Override num_inference_steps default to 8 (distilled)
+        if is_ltx2 and request.num_inference_steps is None:
+            gen_params.num_inference_steps = 8
+            logger.info("LTX2: Using distilled default (8 inference steps)")
+        elif request.num_inference_steps is not None:
             gen_params.num_inference_steps = request.num_inference_steps
+
         if request.guidance_scale is not None:
             gen_params.guidance_scale = request.guidance_scale
         if request.guidance_scale_2 is not None:
@@ -153,8 +162,51 @@ class OmniOpenAIServingVideo:
                 return base_paths[0].name
         return None
 
+    def _is_ltx2_model(self) -> bool:
+        """Check if the current model is LTX2Pipeline."""
+        if not self._stage_configs:
+            return False
+
+        # Check first stage config for model_class_name
+        first_stage = self._stage_configs[0] if isinstance(self._stage_configs, list) else self._stage_configs
+
+        # Handle both dict-like and object attribute access
+        if isinstance(first_stage, dict):
+            model_class = first_stage.get("model_class_name", "")
+        else:
+            model_class = getattr(first_stage, "model_class_name", "")
+
+        return model_class == "LTX2Pipeline"
+
     @staticmethod
-    def _resolve_video_params(request: VideoGenerationRequest) -> tuple[int | None, int | None, int | None, int | None]:
+    def _snap_to_ltx2_frames(num_frames: int) -> int:
+        """Snap num_frames to nearest valid LTX2 value (8K+1).
+
+        LTX2 requires num_frames = 8K + 1 due to VAE temporal downsampling.
+        Examples: 9, 17, 25, 33, 41, 49, 57, 65, 121, etc.
+
+        Args:
+            num_frames: Requested frame count
+
+        Returns:
+            Nearest valid frame count
+        """
+        if (num_frames - 1) % 8 == 0:
+            return num_frames  # Already valid
+
+        k = (num_frames - 1) // 8
+        low = 8 * k + 1
+        high = 8 * (k + 1) + 1
+
+        # Return closest valid value
+        return low if (num_frames - low) < (high - num_frames) else high
+
+    @staticmethod
+    def _resolve_video_params(
+        request: VideoGenerationRequest,
+        is_ltx2: bool = False,
+    ) -> tuple[int | None, int | None, int | None, int | None]:
+        """Resolve video parameters from request, with LTX2-specific handling."""
         width = request.width or (request.video_params.width if request.video_params else None)
         height = request.height or (request.video_params.height if request.video_params else None)
         num_frames = request.num_frames or (request.video_params.num_frames if request.video_params else None)
@@ -164,11 +216,29 @@ class OmniOpenAIServingVideo:
         if request.size:
             width, height = parse_size(request.size)
 
-        if fps is None:
-            fps = 24  # Default FPS if not specified
+        # LTX2: Round dimensions to nearest multiple of 32
+        if is_ltx2:
+            if width is not None:
+                width = ((width + 15) // 32) * 32
+            if height is not None:
+                height = ((height + 15) // 32) * 32
 
+        # Default FPS
+        if fps is None:
+            fps = 24
+
+        # Calculate num_frames from seconds if needed
         if num_frames is None and seconds is not None:
             num_frames = int(seconds) * int(fps)
+
+        # LTX2: Snap to 8K+1 constraint
+        if is_ltx2 and num_frames is not None:
+            original_frames = num_frames
+            num_frames = OmniOpenAIServingVideo._snap_to_ltx2_frames(num_frames)
+            if num_frames != original_frames:
+                logger.info(
+                    f"LTX2: Adjusted num_frames {original_frames} -> {num_frames} (8K+1 constraint)"
+                )
 
         return width, height, num_frames, fps
 

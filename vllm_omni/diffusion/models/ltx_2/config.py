@@ -81,13 +81,13 @@ def load_ltx2_model_config(checkpoint_path: str) -> Dict:
 
 
 def get_default_ltx2_params() -> Dict:
-    """Return default generation parameters for LTX-2.
+    """Return default generation parameters for LTX-2 distilled model.
 
     Returns:
         Dictionary of default parameters
     """
     return {
-        "num_inference_steps": 40,
+        "num_inference_steps": 8,  # Distilled: 8 steps (was 40)
         "guidance_scale": 4.0,
         "fps": 24.0,
         "height": 512,

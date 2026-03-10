@@ -426,7 +426,13 @@ class LTX2Pipeline(nn.Module):
             )
 
         # Extract and validate parameters
-        prompt = req.prompt if isinstance(req.prompt, str) else req.prompt[0]
+        if req.prompt is None:
+            prompt = ""  # Empty prompt for warmup/health checks
+        elif isinstance(req.prompt, str):
+            prompt = req.prompt
+        else:
+            prompt = req.prompt[0] if req.prompt else ""
+
         height = req.height if req.height is not None else self.default_params["height"]
         width = req.width if req.width is not None else self.default_params["width"]
         num_frames = (

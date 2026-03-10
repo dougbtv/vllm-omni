@@ -173,7 +173,8 @@ class OmniDiffusionRequest:
         elif self.prompt is not None:
             batch_size = 1
         else:
-            batch_size = self.prompt_embeds[0].shape[0]
+            # Handle warmup/health check case where prompt_embeds might be empty
+            batch_size = self.prompt_embeds[0].shape[0] if self.prompt_embeds else 1
 
         # Adjust batch size for number of videos per prompt
         batch_size *= self.num_outputs_per_prompt

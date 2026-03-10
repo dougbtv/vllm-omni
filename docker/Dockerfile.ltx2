@@ -27,7 +27,7 @@
 # ==============================================================================
 
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai
-ARG VLLM_BASE_TAG=v0.12.0
+ARG VLLM_BASE_TAG=v0.16.0
 FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG}
 
 ARG APP_DIR=/workspace/vllm-omni
@@ -37,6 +37,8 @@ WORKDIR ${APP_DIR}
 COPY . .
 
 # Install vllm-omni and LTX-2 dependencies
+# Set version for setuptools-scm (git not available in container)
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0
 RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir ".[dev]" && \
     uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-core && \
     uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir -e references/LTX-2/packages/ltx-pipelines && \

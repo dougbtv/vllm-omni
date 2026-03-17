@@ -141,6 +141,116 @@ class VLLMOmniGenerateImage(_VLLMOmniGenerateBase):
         return (output,)
 
 
+class VLLMOmniGenerateVideo(_VLLMOmniGenerateBase):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "url": ("STRING", {"default": "http://localhost:8000/v1"}),
+                "model": ("STRING", {"default": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"}),
+                "prompt": ("STRING", {"multiline": True}),
+                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "width": ("INT", {"default": 1280, "min": 64, "max": 2048}),
+                "height": ("INT", {"default": 720, "min": 64, "max": 2048}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+                "num_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1000,
+                        "tooltip": "Number of frames (0 = use model default or calculate from seconds)",
+                    },
+                ),
+                "seconds": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 60,
+                        "tooltip": "Video duration in seconds (0 = use model default or num_frames)",
+                    },
+                ),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "sampling_params": ("SAMPLING_PARAMS",),
+            },
+        }
+
+    RETURN_TYPES = ("VIDEO", "AUDIO")
+    RETURN_NAMES = ("video", "audio")
+    FUNCTION = "generate"
+
+    async def generate(
+        self,
+        url: str,
+        model: str,
+        prompt: str,
+        width: int,
+        height: int,
+        fps: int,
+        num_frames: int,
+        seconds: int,
+        negative_prompt: str | None = None,
+        image: torch.Tensor | None = None,
+        sampling_params: dict | list[dict] | None = None,
+        **kwargs,
+    ):
+        logger.info("Uncaught kwargs: %s", kwargs)
+        logger.debug("Got sampling params: %s", sampling_params)
+        validate_model_and_sampling_params_types(model, sampling_params)
+
+        # Calculate num_frames from seconds if needed
+        if num_frames == 0 and seconds > 0:
+            num_frames = seconds * fps
+            logger.debug("Calculated num_frames from seconds: %d = %d * %d", num_frames, seconds, fps)
+
+        # Pass None to API if still 0 (use model defaults)
+        num_frames_param = num_frames if num_frames > 0 else None
+        seconds_param = seconds if seconds > 0 else None
+
+        # The number of sampling parameter groups should have been validated.
+        # Convert single-item list to dict.
+        if isinstance(sampling_params, list):
+            sampling_params = sampling_params[0]
+
+        client = VLLMOmniClient(url)
+
+        logger.info("Generating video with model: %s", model)
+        video = await client.generate_video(
+            model=model,
+            prompt=prompt,
+            width=width,
+            height=height,
+            num_frames=num_frames_param,
+            fps=fps,
+            seconds=seconds_param,
+            negative_prompt=negative_prompt,
+            image=image,
+            sampling_params=sampling_params,
+        )
+
+        # Extract audio from video or create silent fallback
+        # VideoInput implementations have a .components property
+        try:
+            video_components = video.components  # type: ignore
+            audio = video_components.audio
+        except (AttributeError, KeyError):
+            audio = None
+
+        if audio is None:
+            # Create silent audio fallback (matching VLLMOmniUnderstanding pattern)
+            channels = 1
+            duration = 1
+            sample_rate = 44100
+            num_samples = int(round(duration * sample_rate))
+            waveform = torch.zeros((1, channels, num_samples), dtype=torch.float32)
+            audio = {"waveform": waveform, "sample_rate": sample_rate}
+
+        return (video, audio)
+
+
 class VLLMOmniUnderstanding(_VLLMOmniGenerateBase):
     @classmethod
     def INPUT_TYPES(cls):
@@ -503,6 +613,120 @@ class VLLMOmniDiffusionSampling:
 
     RETURN_TYPES = ("SAMPLING_PARAMS",)
     RETURN_NAMES = ("diffusion sampling params",)
+    FUNCTION = "get_params"
+    CATEGORY = "vLLM-Omni/Sampling Params"
+
+    def get_params(self, seed, **kwargs):
+        params = DiffusionSamplingParams(kwargs)
+        if seed >= 0:
+            params["seed"] = seed
+        return (params,)
+
+
+class VLLMOmniVideoSampling:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "n": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 10,
+                        "step": 1,
+                        "tooltip": "Number of videos to generate",
+                    },
+                ),
+                "num_inference_steps": (
+                    "INT",
+                    {
+                        "default": 50,
+                        "min": 1,
+                        "max": 1000,
+                        "tooltip": "Number of denoising steps (higher = better quality, slower).",
+                    },
+                ),
+                "guidance_scale": (
+                    "FLOAT",
+                    {
+                        "default": 7.5,
+                        "min": 0.0,
+                        "max": 20.0,
+                        "step": 0.1,
+                        "tooltip": "Classifier-free guidance scale for low-noise region.",
+                    },
+                ),
+                "guidance_scale_2": (
+                    "FLOAT",
+                    {
+                        "default": 7.5,
+                        "min": 0.0,
+                        "max": 20.0,
+                        "step": 0.1,
+                        "tooltip": "CFG scale for high-noise region (Wan2.2-specific).",
+                    },
+                ),
+                "boundary_ratio": (
+                    "FLOAT",
+                    {
+                        "default": 0.25,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Low/high noise DiT split ratio (Wan2.2-specific).",
+                    },
+                ),
+                "flow_shift": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
+                        "min": 0.0,
+                        "max": 20.0,
+                        "step": 0.1,
+                        "tooltip": "Flow matching scheduler parameter (Wan2.2-specific).",
+                    },
+                ),
+                "true_cfg_scale": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 20.0,
+                        "step": 0.5,
+                        "tooltip": "True CFG scale for advanced control (model-specific).",
+                    },
+                ),
+                "vae_use_slicing": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Enable VAE slicing for reduced memory usage (slight quality trade-off)",
+                    },
+                ),
+                "vae_use_tiling": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Enable VAE tiling for reduced memory usage (slight quality trade-off)",
+                    },
+                ),
+                # === Put seed at last. ===
+                # Whenever a field named "seed" is present, ComfyUI adds another field called "control after generate"
+                "seed": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "min": -1,
+                        "step": 1,
+                        "tooltip": "-1 means to not provide a seed.",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("SAMPLING_PARAMS",)
+    RETURN_NAMES = ("video sampling params",)
     FUNCTION = "get_params"
     CATEGORY = "vLLM-Omni/Sampling Params"
 

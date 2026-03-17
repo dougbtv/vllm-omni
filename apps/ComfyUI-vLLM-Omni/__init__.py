@@ -14,10 +14,12 @@ from .comfyui_vllm_omni.nodes import (
     VLLMOmniARSampling,
     VLLMOmniDiffusionSampling,
     VLLMOmniGenerateImage,
+    VLLMOmniGenerateVideo,
     VLLMOmniQwenTTSParams,
     VLLMOmniSamplingParamsList,
     VLLMOmniTTS,
     VLLMOmniUnderstanding,
+    VLLMOmniVideoSampling,
     VLLMOmniVoiceClone,
 )
 
@@ -25,12 +27,14 @@ from .comfyui_vllm_omni.nodes import (
 NODE_CLASS_MAPPINGS = {
     # === Generation ===
     "VLLMOmniGenerateImage": VLLMOmniGenerateImage,
+    "VLLMOmniGenerateVideo": VLLMOmniGenerateVideo,
     "VLLMOmniUnderstanding": VLLMOmniUnderstanding,
     "VLLMOmniTTS": VLLMOmniTTS,
     "VLLMOmniVoiceClone": VLLMOmniVoiceClone,
     # === Params ===
     "VLLMOmniARSampling": VLLMOmniARSampling,
     "VLLMOmniDiffusionSampling": VLLMOmniDiffusionSampling,
+    "VLLMOmniVideoSampling": VLLMOmniVideoSampling,
     "VLLMOmniSamplingParamsList": VLLMOmniSamplingParamsList,
     "VLLMOmniQwenTTSParams": VLLMOmniQwenTTSParams,
 }
@@ -39,12 +43,14 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     # === Generation ===
     "VLLMOmniGenerateImage": "Generate Image",
+    "VLLMOmniGenerateVideo": "Generate Video",
     "VLLMOmniUnderstanding": "Multimodality Understanding",
     "VLLMOmniTTS": "TTS (Text to Speech)",
     "VLLMOmniVoiceClone": "TTS Voice Cloning",
     # === Params ===
     "VLLMOmniARSampling": "AR Sampling Params",
     "VLLMOmniDiffusionSampling": "Diffusion Sampling Params",
+    "VLLMOmniVideoSampling": "Video Sampling Params",
     "VLLMOmniSamplingParamsList": "Multi-Stage Sampling Params List",
     "VLLMOmniQwenTTSParams": "Qwen TTS Params",
 }

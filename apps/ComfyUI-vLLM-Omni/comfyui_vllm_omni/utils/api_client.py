@@ -17,6 +17,7 @@ from .format import (
     audio_to_base64,
     base64_to_audio,
     base64_to_image_tensor,
+    base64_to_video,
     bytes_to_audio,
     image_tensor_to_base64,
     image_tensor_to_png_bytes,
@@ -172,6 +173,194 @@ class VLLMOmniClient:
 
             except aiohttp.ClientError as e:
                 raise RuntimeError(f"Network error connecting to vLLM-Omni at {url}: {e}")
+
+    async def generate_video(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        num_frames: int | None = None,
+        fps: int | None = None,
+        seconds: int | None = None,
+        negative_prompt: str | None = None,
+        image: torch.Tensor | None = None,
+        sampling_params: dict | None = None,
+    ) -> VideoInput:
+        """Run text-to-video or image-to-video generation via async video API
+
+        This method handles the async job flow:
+        1. POST /v1/videos to create job
+        2. Poll GET /v1/videos/{job_id} until completion
+        3. GET /v1/videos/{job_id}/content to download video
+        4. Convert to VideoInput
+        """
+        await self._check_model_exist(model)
+
+        form = aiohttp.FormData()
+        form.add_field("model", model)
+        form.add_field("prompt", prompt)
+
+        # Add optional dimension parameters
+        if width is not None:
+            form.add_field("width", str(width))
+        if height is not None:
+            form.add_field("height", str(height))
+        if num_frames is not None:
+            form.add_field("num_frames", str(num_frames))
+        if fps is not None:
+            form.add_field("fps", str(fps))
+        if seconds is not None:
+            form.add_field("seconds", str(seconds))
+        if negative_prompt:
+            form.add_field("negative_prompt", negative_prompt)
+
+        # Add sampling parameters
+        if sampling_params is not None:
+            for k, v in sampling_params.items():
+                form.add_field(k, str(v))
+
+        # Add image for I2V mode
+        if image is not None:
+            image_filename = "input_reference.png"
+            form.add_field(
+                "input_reference",
+                image_tensor_to_png_bytes(image, image_filename),
+                filename=image_filename,
+                content_type="image/png",
+            )
+
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            # Step 1: Create video generation job
+            create_url = self.base_url + "/videos"
+            try:
+                async with session.post(create_url, data=form) as response:
+                    if not response.ok:
+                        error_text = await response.text()
+                        raise (ValueError if response.status < 500 else RuntimeError)(
+                            f"vLLM-Omni API returned status {response.status}: {error_text}"
+                        )
+
+                    try:
+                        job_data = await response.json()
+                    except aiohttp.ContentTypeError as e:
+                        raise RuntimeError(f"Invalid JSON response from vLLM-Omni: {e}")
+
+                    if "id" not in job_data:
+                        raise RuntimeError(f"API response missing 'id' field - expected async job format. Got: {list(job_data.keys())}")
+
+                    job_id = job_data["id"]
+                    logger.info(f"Video generation job created: {job_id}")
+
+            except aiohttp.ClientError as e:
+                raise RuntimeError(f"Network error connecting to vLLM-Omni at {create_url}: {e}")
+
+            # Step 2: Poll for job completion
+            status_url = self.base_url + f"/videos/{job_id}"
+            poll_interval = 2.0  # seconds
+            max_wait_time = 600  # 10 minutes max
+            start_time = __import__('time').time()
+
+            while True:
+                if __import__('time').time() - start_time > max_wait_time:
+                    raise RuntimeError(f"Video generation timed out after {max_wait_time}s")
+
+                try:
+                    async with session.get(status_url) as response:
+                        if not response.ok:
+                            error_text = await response.text()
+                            raise RuntimeError(f"Failed to check job status: {response.status}: {error_text}")
+
+                        status_data = await response.json()
+                        status = status_data.get("status")
+                        progress = status_data.get("progress", 0)
+
+                        logger.debug(f"Job {job_id} status: {status}, progress: {progress}%")
+
+                        if status == "failed":
+                            error = status_data.get("error", "Unknown error")
+                            raise RuntimeError(f"Video generation failed: {error}")
+
+                        if status == "completed":
+                            logger.info(f"Job {job_id} completed successfully")
+                            break
+
+                        # Still in progress, wait before polling again
+                        await __import__('asyncio').sleep(poll_interval)
+
+                except aiohttp.ClientError as e:
+                    raise RuntimeError(f"Network error polling job status: {e}")
+
+            # Step 3: Download video content
+            content_url = self.base_url + f"/videos/{job_id}/content"
+            try:
+                async with session.get(content_url) as response:
+                    if not response.ok:
+                        error_text = await response.text()
+                        raise RuntimeError(f"Failed to download video: {response.status}: {error_text}")
+
+                    video_bytes = await response.read()
+                    logger.info(f"Downloaded video: {len(video_bytes)} bytes")
+
+                    # Step 4: Convert MP4 bytes to VideoInput
+                    from io import BytesIO
+                    video_buffer = BytesIO(video_bytes)
+
+                    # Decode using PyAV (similar to base64_to_video but from bytes)
+                    import av
+                    from fractions import Fraction
+                    from comfy_extras import nodes_audio
+                    from comfy_api.input_impl import VideoFromComponents
+                    from comfy_api.latest._util.video_types import VideoComponents
+
+                    try:
+                        container = av.open(video_buffer)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to decode MP4 video: {e}")
+
+                    # Extract video stream
+                    video_stream = None
+                    for stream in container.streams:
+                        if stream.type == "video":
+                            video_stream = stream
+                            break
+
+                    if video_stream is None:
+                        raise RuntimeError("No video stream found in MP4 file")
+
+                    # Extract frames
+                    frames = []
+                    for frame in container.decode(video_stream):
+                        frame_np = frame.to_ndarray(format="rgb24")
+                        frame_tensor = torch.from_numpy(frame_np).float() / 255.0
+                        frames.append(frame_tensor)
+
+                    if not frames:
+                        raise RuntimeError("No frames extracted from video")
+
+                    video_tensor = torch.stack(frames, dim=0)
+                    frame_rate = Fraction(video_stream.average_rate.numerator, video_stream.average_rate.denominator)
+
+                    # Extract audio if present
+                    audio = None
+                    for stream in container.streams:
+                        if stream.type == "audio":
+                            video_buffer.seek(0)
+                            try:
+                                waveform, sample_rate = nodes_audio.load(video_buffer)  # type: ignore
+                                audio = {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
+                            except Exception:
+                                logger.debug("Failed to extract audio from video, continuing without audio")
+                            break
+
+                    container.close()
+
+                    video_components = VideoComponents(images=video_tensor, frame_rate=frame_rate, audio=audio)
+                    return VideoFromComponents(video_components)
+
+            except aiohttp.ClientError as e:
+                raise RuntimeError(f"Network error downloading video: {e}")
 
     async def generate_image_chat_completion(
         self,

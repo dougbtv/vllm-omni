@@ -6,12 +6,15 @@ Original source at https://github.com/dougbtv/comfyui-vllm-omni, distributed und
 
 import base64
 import mimetypes
+from fractions import Fraction
 from io import BytesIO
 
 import av
 import numpy as np
 import torch
 from comfy_api.input import AudioInput, VideoInput
+from comfy_api.input_impl import VideoFromComponents
+from comfy_api.latest._util.video_types import VideoComponents
 from comfy_extras import nodes_audio
 from PIL import Image
 
@@ -228,3 +231,83 @@ def base64_to_audio(base64_str: str) -> AudioInput:
         raise ValueError(f"Invalid base64 string: {e}")
 
     return bytes_to_audio(audio_bytes)
+
+
+def base64_to_video(base64_str: str) -> VideoInput:
+    """
+    Convert base64-encoded video (MP4) to ComfyUI VideoInput.
+
+    Args:
+        base64_str: Base64-encoded video string (MP4 format)
+
+    Returns:
+        VideoInput with frames, frame_rate, and optional audio
+
+    Raises:
+        ValueError: If base64 string is invalid
+        RuntimeError: If video cannot be decoded or missing video stream
+    """
+    if base64_str.startswith("data:video"):
+        _, base64_str = base64_str.split(",", 1)
+
+    try:
+        # Decode base64 to bytes
+        video_bytes = base64.b64decode(base64_str)
+    except Exception as e:
+        raise ValueError(f"Invalid base64 string: {e}")
+
+    # Create BytesIO buffer for PyAV
+    video_buffer = BytesIO(video_bytes)
+
+    try:
+        container = av.open(video_buffer)
+    except Exception as e:
+        raise RuntimeError(f"Failed to decode MP4 video: {e}")
+
+    # Extract video stream
+    video_stream = None
+    for stream in container.streams:
+        if stream.type == "video":
+            video_stream = stream
+            break
+
+    if video_stream is None:
+        raise RuntimeError("No video stream found in MP4 file")
+
+    # Extract frames
+    frames = []
+    for frame in container.decode(video_stream):
+        # Convert frame to numpy array (RGB format)
+        frame_np = frame.to_ndarray(format="rgb24")  # Shape: (H, W, 3)
+        # Normalize to [0, 1] and convert to torch tensor
+        frame_tensor = torch.from_numpy(frame_np).float() / 255.0
+        frames.append(frame_tensor)
+
+    if not frames:
+        raise RuntimeError("No frames extracted from video")
+
+    # Stack frames: (num_frames, H, W, 3)
+    video_tensor = torch.stack(frames, dim=0)
+
+    # Get frame rate as Fraction
+    frame_rate = Fraction(video_stream.average_rate.numerator, video_stream.average_rate.denominator)
+
+    # Extract audio if present
+    audio = None
+    for stream in container.streams:
+        if stream.type == "audio":
+            # Decode audio using existing audio loading logic
+            video_buffer.seek(0)
+            try:
+                waveform, sample_rate = nodes_audio.load(video_buffer)  # type: ignore
+                audio = {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
+            except Exception:
+                # Audio extraction failed, leave as None
+                logger.debug("Failed to extract audio from video, continuing without audio")
+            break
+
+    container.close()
+
+    # Create VideoInput using VideoFromComponents
+    video_components = VideoComponents(images=video_tensor, frame_rate=frame_rate, audio=audio)
+    return VideoFromComponents(video_components)

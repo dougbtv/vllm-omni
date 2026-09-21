@@ -61,6 +61,11 @@ jobs:
           set -euo pipefail
           archive_dir="$(mktemp -d)"
           install_dir="$(mktemp -d)"
+          vcs_wheels=(dist/*.whl)
+          if [[ ${#vcs_wheels[@]} -ne 1 || ! -f "${vcs_wheels[0]}" ]]; then
+            echo "Expected exactly one VCS-built wheel" >&2
+            exit 1
+          fi
           git archive HEAD | tar -x -C "${archive_dir}"
           (
             cd "${archive_dir}"
@@ -77,6 +82,7 @@ jobs:
           python tools/check_wheel_package_data.py \
             --source-root "${archive_dir}" \
             --wheel "${wheels[0]}" \
+            --vcs-wheel "${vcs_wheels[0]}" \
             --installed-root "${install_dir}"
 
       - name: Upload Wheel Artifact

@@ -89,6 +89,49 @@ def test_vllm_dense_adapter_builds_varlen_metadata_and_restores_lse(monkeypatch)
     assert captured["softmax_scale"] == 0.25
 
 
+@hardware_test(res={"cuda": ["L4", "H100"]}, num_cards=1)
+@pytest.mark.skipif(not current_omni_platform.is_cuda(), reason="vLLM FlashAttention requires CUDA")
+def test_vllm_dense_adapter_cuda_matches_sdpa_and_lse():
+    """Exercise the real versioned vLLM dispatcher and its LSE contract."""
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    batch_size, seqlen_q, seqlen_k, num_heads, head_dim = 2, 17, 23, 4, 64
+    softmax_scale = head_dim**-0.5
+
+    torch.manual_seed(19)
+    query = torch.randn(batch_size, seqlen_q, num_heads, head_dim, device=device, dtype=dtype)
+    key = torch.randn(batch_size, seqlen_k, num_heads, head_dim, device=device, dtype=dtype)
+    value = torch.randn_like(key)
+
+    capability = torch.cuda.get_device_capability(device)
+    expected_version = 3 if capability[0] == 9 else 2
+    assert capability[0] in (8, 9), f"test expects an Ampere/Ada or Hopper GPU, got SM{capability[0]}{capability[1]}"
+    assert fa.resolve_vllm_flash_attn_version() == expected_version
+
+    output, lse = fa.vllm_flash_attn_dense_with_lse(
+        query,
+        key,
+        value,
+        softmax_scale=softmax_scale,
+        causal=False,
+    )
+
+    query_bhsd = query.transpose(1, 2)
+    key_bhsd = key.transpose(1, 2)
+    value_bhsd = value.transpose(1, 2)
+    output_ref = torch.nn.functional.scaled_dot_product_attention(
+        query_bhsd,
+        key_bhsd,
+        value_bhsd,
+        scale=softmax_scale,
+    ).transpose(1, 2)
+    logits = torch.matmul(query_bhsd.float(), key_bhsd.float().transpose(-2, -1)) * softmax_scale
+    lse_ref = torch.logsumexp(logits, dim=-1)
+
+    torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-3)
+
+
 def create_attention_mask(batch_size: int, seq_len: int, valid_len: int, device: torch.device) -> torch.Tensor:
     """
     Create attention mask where first valid_len tokens are valid (1) and rest are padding (0).

@@ -159,6 +159,9 @@ vllm-omni = "vllm_omni.entrypoints.cli.main:main"
 vllm_omni_register_models = "vllm_omni.engine.arg_utils:register_omni_models_to_vllm"
 
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vllm_omni*"]
